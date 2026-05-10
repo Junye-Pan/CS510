@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentic_opt.common.atomic import atomic_write_text
+from agentic_opt.common.config import get_repo_root
 from agentic_opt.common.runtime_env import PreparedRuntimeEnv, prepare_task_runtime
 from agentic_opt.task_api import CandidateSpec, candidate_entry_path, candidate_spec_for
 from agentic_opt.task_registry import get_task
@@ -68,6 +69,8 @@ def prepare_semantic_workspace(
         workspace_root=workspace_root,
     )
     environment_exports = _environment_exports(runtime_env)
+    repo_src = str(get_repo_root() / "src")
+    venv_bin = str(runtime_env.venv_dir / "bin")
     env = {
         "AO_CONTROL_API_URL": api_url,
         "AO_ASSIGNMENT_ID": assignment["assignment_id"],
@@ -78,7 +81,9 @@ def prepare_semantic_workspace(
         "AO_WORKSPACE_ROOT": str(workspace_root),
         **environment_exports,
         **runtime_env.exports(),
-        "PATH": _prepend_path(str(bin_dir), os.environ.get("PATH")),
+        "PATH": _prepend_paths([str(bin_dir), venv_bin], os.environ.get("PATH")),
+        "PYTHONPATH": _prepend_path(repo_src, os.environ.get("PYTHONPATH")),
+        "VIRTUAL_ENV": str(runtime_env.venv_dir),
     }
     return SemanticWorkspace(
         root=workspace_root,
@@ -282,6 +287,8 @@ def _write_semantic_tool_wrappers(
         "AO_WORKSPACE_ROOT": str(workspace_root),
         **_environment_exports(runtime_env),
         **runtime_env.exports(),
+        "PYTHONPATH": _prepend_path(str(get_repo_root() / "src"), os.environ.get("PYTHONPATH")),
+        "VIRTUAL_ENV": str(runtime_env.venv_dir),
     }
     for command_name in ("ctx", "artifact", "eval", "finding", "notebook", "job", "env", "telemetry"):
         lines = ["#!/bin/sh", "set -eu"]
@@ -299,6 +306,13 @@ def _prepend_path(prefix: str, current: str | None) -> str:
     if not current:
         return prefix
     return prefix if current.split(":")[0] == prefix else f"{prefix}:{current}"
+
+
+def _prepend_paths(prefixes: list[str], current: str | None) -> str:
+    result = current or ""
+    for prefix in reversed(prefixes):
+        result = _prepend_path(prefix, result)
+    return result
 
 
 def _environment_exports(runtime_env: PreparedRuntimeEnv) -> dict[str, str]:

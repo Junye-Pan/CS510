@@ -273,15 +273,17 @@ class AppServerCodexAdapter(CodexAdapter):
             hints.append(f"skills: {instructions.skills_root_path}")
         if workspace.allow_network:
             access_guidance = (
-                "Use semantic server tools (`ctx`, `artifact`, `eval`, `finding`, `notebook`, `job`) for "
-                "experiment history, artifacts, feedback, and durable state. Public network search is allowed when it "
-                "has expected value; do not browse or depend on hidden evaluator logic, private assets, or non-public archives."
+                "Use semantic server tools (`ctx`, `artifact`, `eval`, `finding`, `notebook`, `job`, `env`, "
+                "`telemetry`) for "
+                "experiment history, artifacts, feedback, and durable state. Network access may be available so these "
+                "tools can reach the local control plane and approved runtime resources; do not browse or depend on "
+                "hidden evaluator logic, private assets, or non-public archives."
             )
         else:
             access_guidance = (
                 "Network access is disabled. Use semantic server tools (`ctx`, `artifact`, `eval`, `finding`, "
-                "`notebook`, `job`) for experiment history, artifacts, feedback, and durable state; do not browse or "
-                "depend on hidden evaluator logic, private assets, or non-public archives."
+                "`notebook`, `job`, `env`, `telemetry`) for experiment history, artifacts, feedback, and durable "
+                "state; do not browse or depend on hidden evaluator logic, private assets, or non-public archives."
             )
         guidance = [
             "Project-local instructions are available on disk.",
@@ -292,18 +294,9 @@ class AppServerCodexAdapter(CodexAdapter):
         return "\n".join(guidance).strip()
 
     def _sandbox_policy(self, workspace: WorkspacePolicy) -> dict[str, Any]:
-        readable_roots = list(workspace.readable_roots)
-        for root in self._tool_support_roots():
-            if root not in readable_roots:
-                readable_roots.append(root)
         return {
             "type": "workspaceWrite",
             "writableRoots": workspace.writable_roots,
-            "readOnlyAccess": {
-                "type": "restricted",
-                "includePlatformDefaults": True,
-                "readableRoots": readable_roots,
-            },
             "networkAccess": workspace.allow_network,
             "excludeTmpdirEnvVar": False,
             "excludeSlashTmp": False,

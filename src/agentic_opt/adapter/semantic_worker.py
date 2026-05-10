@@ -98,7 +98,10 @@ def main(argv: list[str] | None = None) -> int:
                 workspace_root=str(workspace.root),
                 writable_roots=workspace.writable_roots,
                 readable_roots=workspace.readable_roots,
-                allow_network=False,
+                # The semantic CLI talks to the control plane over localhost.
+                # Without App Server network access, ctx/eval/finding/notebook
+                # fail before a worker can report durable experiment state.
+                allow_network=True,
             ),
             instructions=InstructionBundle(
                 task_id=assignment["task_id"],
@@ -143,6 +146,23 @@ def main(argv: list[str] | None = None) -> int:
             stop_reason = "turn_failed"
         _checkpoint_initial_notebook(client=client, assignment=assignment, session_id=args.session_id, workspace_root=workspace.root)
         adapter.close_session(session_id=session.session_id, final_status=final_status)
+    except TimeoutError as exc:
+        final_status = "stopped"
+        stop_reason = "turn_timeout"
+        client.post(
+            "/api/v1/events",
+            {
+                "experiment_id": assignment["experiment_id"],
+                "assignment_id": assignment["assignment_id"],
+                "session_id": args.session_id,
+                "task_id": assignment["task_id"],
+                "agent_id": assignment["agent_id"],
+                "event_type": "agent.turn.timeout",
+                "summary": "semantic agent turn timed out",
+                "payload": {"error_type": type(exc).__name__, "message": str(exc)},
+            },
+        )
+        _checkpoint_initial_notebook(client=client, assignment=assignment, session_id=args.session_id, workspace_root=workspace.root)
     except Exception as exc:
         final_status = "failed"
         stop_reason = "worker_exception"

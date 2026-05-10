@@ -240,6 +240,14 @@ WorkerSession:
   One concrete agent execution attached to an assignment.
   May be local, Docker, cloud, or another backend.
 
+Environment:
+  Server-owned runtime environment prepared from framework or task specs.
+  Current default provider is local_venv; docker_image is the next provider gap.
+
+EnvironmentOverlay:
+  Worker-requested dependency extension layered on a base environment under
+  experiment policy. It must not mutate the task base environment.
+
 Attempt:
   A candidate artifact snapshot or code state produced by a worker.
   May link to jobs, evaluations, findings, traces, and notebook checkpoints.
@@ -257,6 +265,10 @@ TelemetryRun:
 Evaluation:
   Server-side official or diagnostic scoring result.
   Links to attempt/artifact/job and returns public-safe metrics.
+
+LeaderboardEntry:
+  Server-owned official score publication. The highest active row in a scope is
+  the derived incumbent.
 
 Artifact:
   Any durable object: code snapshot, model, checkpoint, task output file, dataset
@@ -280,13 +292,17 @@ Policy / Budget / Approval:
 The important refactor is the protocol boundary. The worker should interact with
 the server through semantic operations.
 
-Worker-to-server operations:
+Target worker-to-server operation family. The current CLI implements this
+through context, artifact, evaluation, job, environment, finding, notebook, and
+telemetry tools; a dedicated `Attempt` resource and some convenience operations
+such as job attach/budget status are still future work.
 
 ```text
 request_context
 search_findings
 get_leaderboard
-checkout_snapshot
+get_incumbent
+checkout_incumbent
 upload_artifact
 create_attempt
 launch_job
@@ -296,6 +312,9 @@ read_job_logs
 submit_for_evaluation
 share_finding
 checkpoint_notebook
+request_environment
+request_environment_overlay
+record_telemetry
 report_failure
 request_budget_status
 ```
@@ -321,12 +340,16 @@ These tools call the server API directly and are not compatibility wrappers
 around the retired prototype command surfaces:
 
 ```text
-ctx       read public context, findings, leaderboard, attempts, snapshots
-job       launch/status/logs/cancel/attach compute jobs
-eval      verify/probe/submit candidates or artifacts
-artifact  upload/download/list materialized artifacts
-finding   share/search/show findings
-notebook  checkpoint and restore worker notebook state
+ctx        read public context, task contract, findings, evaluations, jobs,
+           environments, leaderboard, incumbent, telemetry, artifacts, and
+           notebook checkpoints
+artifact   upload/list artifacts and checkout the current incumbent candidate
+eval       verify/probe/submit candidates or artifacts
+finding    share/search findings
+notebook   checkpoint/list worker notebook state
+job        launch/status/logs/wait/cancel compute jobs
+env        inspect task environments and request dependency overlays
+telemetry  start/log-metrics/status/list/finish non-official metric runs
 ```
 
 The exact command names are less important than the boundary: worker-facing
@@ -583,11 +606,13 @@ src/agentic_opt/common/
   low-level utilities used by the new runtime and task boundary
 
 src/agentic_opt/control_plane/
-  server-owned resource repository, artifact registry, job service,
+  server-owned resource repository, artifact registry, environment service,
+  job service, telemetry service, leaderboard/incumbent publication,
   asynchronous evaluation worker, and object-model schema
 
 src/agentic_opt/worker_tools/
-  semantic worker CLI: ctx, artifact, eval, finding, notebook, job
+  semantic worker CLI: ctx, artifact, eval, finding, notebook, job, env,
+  telemetry
 
 src/agentic_opt/adapter/
   Codex/App Server adapter, semantic workspace preparation, and semantic worker
@@ -619,9 +644,10 @@ Current verification target:
 
 ```bash
 python3 -m compileall src/agentic_opt
-PYTHONPATH=src python3 -m unittest tests.test_web_backend tests.test_semantic_workspace -v
+PYTHONPATH=src python3 -m unittest tests.test_web_backend tests.test_semantic_workspace tests.test_circle_packing_task -v
 PYTHONPATH=src python3 -m agentic_opt.adapter.semantic_worker --help
 PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli --help
+PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli env --help
 PYTHONPATH=src python3 -m agentic_opt.web.app --help
 ```
 
@@ -661,13 +687,14 @@ Stage 3: Semantic worker tools
   and notebook checkpoints.
 - Prefer semantic server tools over low-level archive command shapes.
 - Make the semantic tools call the server API directly. `ctx`, `eval`,
-  `artifact`, `finding`, `notebook`, `job`, and `telemetry` are first-class
-  worker tools, not compatibility wrappers around the retired prototype tools.
+  `artifact`, `finding`, `notebook`, `job`, `env`, and `telemetry` are
+  first-class worker tools, not compatibility wrappers around the retired
+  prototype tools.
 - Preserve reproducibility through explicit export commands generated from
   server-owned resources, not by depending on the old filesystem layout.
-- Status: complete for the first semantic tool surface. Worker workspaces expose
-  `ctx`, `artifact`, `eval`, `finding`, `notebook`, `job`, and `telemetry`; no
-  `fs` or `ve` wrappers should be materialized.
+- Status: complete for the current semantic tool surface. Worker workspaces
+  expose `ctx`, `artifact`, `eval`, `finding`, `notebook`, `job`, `env`, and
+  `telemetry`; no `fs` or `ve` wrappers should be materialized.
 
 Stage 4: Artifact registry
 
@@ -734,6 +761,20 @@ Stage 7: Telemetry provider
   adapter. Telemetry is exposed through API routes and the worker `telemetry`
   tool, and remains separate from official evaluation.
 
+Environment control checkpoint:
+
+- Task runtime dependencies are now represented as server-owned environments
+  rather than ad hoc interpreter assumptions.
+- Current implementation uses `EnvironmentService` with a `local_venv` default
+  provider, durable `Environment` and `EnvironmentOverlay` records, task base
+  environment preparation, evaluation environment metadata, and the worker
+  `env` tool.
+- Workers request extra dependencies through overlays instead of mutating the
+  task base environment. `verify` and `probe` can use approved overlays; official
+  `submit` currently resolves through the task base environment.
+- Remaining gap: add the `docker_image` provider behind the same resource model
+  for stronger reproducibility and isolation.
+
 Stage 8: Convert tasks
 
 - Convert existing tasks onto the new Task/Experiment/Assignment model.
@@ -741,8 +782,11 @@ Stage 8: Convert tasks
 - Remove direct task dependence on old archive paths where possible.
 - Add one ML-style task to validate train/predict/evaluate, artifact registry,
   job service, MLflow telemetry, and hidden evaluator isolation.
-- Status: pending. Do not perform broad task migration as part of framework
-  cleanup; touch task packages only for explicit task-conversion work.
+- Status: partially started. `tasks/circle_packing_26` is the current converted
+  benchmark task and exercises task runtime specs, environment preparation,
+  verify/probe/submit, candidate snapshots, leaderboard/incumbent, and research
+  direction assignment. Broad task migration and the first ML-style task remain
+  pending.
 
 Stage 9: Cloud execution
 

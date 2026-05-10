@@ -66,6 +66,7 @@ scripts/
 tests/
   test_web_backend.py
   test_semantic_workspace.py
+  test_circle_packing_task.py
   test_live_local_appserver.py
 ```
 
@@ -129,6 +130,7 @@ cp_environment_overlays
 cp_jobs
 cp_artifacts
 cp_evaluations
+cp_leaderboard_entries
 cp_telemetry_runs
 cp_findings
 cp_notebook_checkpoints
@@ -181,8 +183,8 @@ represented as findings, usually by choosing a `finding_type` such as
 ### 4.3 ControlPlaneService Responsibilities
 
 `ControlPlaneService` coordinates the active services below. `EnvironmentService`
-is the accepted next service boundary and should replace ad hoc runtime helper
-use as it is implemented.
+is now the server-owned environment boundary for task base environments and
+worker overlays. The remaining environment-provider gap is `docker_image`.
 
 - task contract exposure
 - local path artifact registration
@@ -306,7 +308,24 @@ POST /api/v1/assignments/<assignment_id>/start-local
   -> update session status
 ```
 
-The worker process receives:
+The semantic worker startup environment and the prepared workspace tool
+environment use these variables. `WorkerManager` starts `semantic_worker` with
+assignment/session identifiers; `semantic_worker` then resolves the task
+environment and writes the full runtime exports into the workspace/App Server
+environment.
+
+The workspace environment prepends both the semantic `bin/` wrappers and the
+task runtime venv `bin/` directory to `PATH`, exports `VIRTUAL_ENV`, and exports
+repo `src` on `PYTHONPATH`. Worker shell commands such as `python` and `pip`
+therefore resolve to the same task runtime used by the semantic tool wrappers,
+instead of whichever interpreter happens to be first on the host `PATH`.
+
+Codex/App Server workers need network access enabled so semantic tools can
+reach the local control-plane HTTP API. This is currently a coarse App Server
+sandbox switch; worker instructions still forbid hidden/private evaluator access
+and direct dependency on non-public archives. A future stricter provider should
+replace this with a localhost/control-plane allowlist when the App Server
+permission model exposes one.
 
 ```text
 AO_CONTROL_API_URL
@@ -369,12 +388,14 @@ candidate entrypoint copied from task public seed
 ```
 
 The tool wrappers call `agentic_opt.worker_tools.semantic_cli` using the
-resolved task or worker-overlay Python. The workspace does not materialize `fs`
-or `ve` wrappers.
+resolved task base Python. Worker overlays are separate environment resources;
+the current workspace wrapper environment is not hot-swapped after overlay
+creation. The workspace does not materialize `fs` or `ve` wrappers.
 
 The startup prompt tells the agent that the server owns experiments,
-assignments, artifacts, jobs, evaluations, findings, notebook checkpoints, and
-policy. It presents semantic tools as capabilities, not as a required sequence.
+assignments, environments, artifacts, jobs, evaluations, leaderboard/incumbent
+state, findings, notebook checkpoints, and policy. It presents semantic tools as
+capabilities, not as a required sequence.
 
 ## 8. Worker Tools
 
@@ -391,34 +412,34 @@ ctx evaluations
 ctx artifacts
 ctx jobs
 ctx environments
-ctx leaderboard
-ctx incumbent
+ctx leaderboard [--limit N]
+ctx incumbent [--direction-id ID]
 ctx telemetry
 
 artifact upload --path <path> --kind <kind>
 artifact list
-artifact checkout-incumbent --destination <path>
+artifact checkout-incumbent --destination <path> [--direction-id ID] [--force]
 
-eval verify --entry <path>
-eval probe --entry <path> [--kind diagnostics]
-eval submit --entry <path>
-eval submit --artifact-id <artifact-id>
+eval verify (--entry <path>|--artifact-id <artifact-id>) [--environment-id ID] [--environment-overlay-id ID] [--sync|--async]
+eval probe (--entry <path>|--artifact-id <artifact-id>) [--kind diagnostics] [--environment-id ID] [--environment-overlay-id ID] [--sync|--async]
+eval submit (--entry <path>|--artifact-id <artifact-id>) [--environment-id ID] [--sync|--async]
 eval status <evaluation-id>
-eval wait <evaluation-id>
+eval wait <evaluation-id> [--timeout-s N]
 
 finding share --type <type> --title <title> --body <text>
 finding share --type <type> --title <title> --file <path>
-finding search [query]
+finding search <query>
 
-notebook checkpoint --file WORKLOG.md
+notebook checkpoint (--file WORKLOG.md|--content <text>) [--kind <kind>]
 notebook list
 
-job create --provider local --command '<command>'
-job create --provider local-docker --image <image> --command '<command>'
+job create --provider local --command '<command>' [--cwd <path>] [--env KEY=VALUE]
+job create --provider local-docker --image <image> --command '<command>' [--cwd <path>]
+job create --provider runpod --template-id <template> --command '<command>' [--gpu-type-id <id>] [--gpu-count N] [--dry-run]
 job list
 job status <job-id>
-job logs <job-id>
-job wait <job-id>
+job logs <job-id> [--max-bytes N]
+job wait <job-id> [--timeout-s N]
 job cancel <job-id>
 
 telemetry start --provider local --name <run-name>
@@ -430,8 +451,8 @@ telemetry finish <telemetry-id>
 
 env status
 env ensure
-env install --pip '<requirement>' --reason '<why this is needed>'
-env list-overlays
+env install --pip '<requirement>' --reason '<why this is needed>' [--approved]
+env list-overlays [--environment-id ID] [--status STATUS]
 env overlay <overlay-id>
 env approve <overlay-id>
 ```
@@ -536,9 +557,9 @@ verify/probe
 
 submit / official
   Defaults to the task base environment.
-  A worker overlay may be used only when explicitly requested and allowed by
-  experiment policy. Leaderboard-eligible records must include the resolved
-  environment fingerprint.
+  Current implementation resolves official submit through the task base
+  environment even if an overlay id is present in the CLI request. Overlay-backed
+  official submit is a future policy/runner extension.
 ```
 
 The current implementation does not yet provide strong sandboxing for hidden
@@ -568,6 +589,11 @@ Incumbents can be queried globally for an experiment or within a research
 direction. `POST /api/v1/incumbent/checkout` copies the incumbent artifact into
 a requested destination path so workers can inspect, repair, or compare it
 without depending on raw artifact storage layout.
+
+Environment fingerprints and dependency locks are currently available through
+the linked `Environment`/`EnvironmentOverlay` records rather than copied into
+the leaderboard row. Copying an immutable environment lock summary into
+leaderboard metadata remains a hardening task for official reproducibility.
 
 ## 11. Artifact Registry
 
@@ -655,6 +681,21 @@ imports, and shadowing rules the task requires. The control plane is
 responsible for resolving that declaration into an environment before task
 code, candidate code, or evaluator code is executed.
 
+### 13.1 Current Converted Task
+
+`tasks/circle_packing_26` is the current concrete converted benchmark. It uses
+the default single-file candidate shape: `initial.py` exposes `run_packing()`,
+which returns centers, radii, and a reported score. The task declares a
+`local_venv` runtime with NumPy/SciPy requirements, validates circle-packing
+feasibility for 26 circles, exposes public diagnostics through `probe`, and
+publishes official scores through `submit`.
+
+Its public `research_directions/manifest.json` is used by assignment generation:
+directions are assigned round-robin and copied into assignment metadata, worker
+context, and startup prompts. This task validates the current environment,
+evaluation, candidate snapshot, leaderboard, incumbent checkout, and research
+direction paths.
+
 ## 14. Environment Control
 
 Environment control is part of the core architecture. Dependency management is
@@ -700,7 +741,7 @@ EnvironmentOverlay
   session_id
   status                  # requested, preparing, ready, blocked, failed
   requested_by_agent_id
-  requirements_added
+  requirements
   reason
   approved
   python_path
@@ -778,17 +819,19 @@ Primary operations:
 
 ```text
 ensure_environment(spec) -> Environment
+ensure_framework_environment() -> Environment
 ensure_task_environment(task_id) -> Environment
-create_overlay(base_environment_id, assignment_id, requirements, reason) -> EnvironmentOverlay
+create_overlay(payload) -> EnvironmentOverlay
 approve_overlay(overlay_id) -> EnvironmentOverlay
-python_for(environment_or_overlay_id) -> Path
-exports_for(environment_or_overlay_id) -> dict[str, str]
-run_in_environment(environment_or_overlay_id, command, cwd, env) -> Job or CompletedProcess
+get_execution_environment(task_id, environment_id=None, overlay_id=None, allow_overlay=False) -> resolved execution environment
+exports_for_environment(environment) -> dict[str, str]
+exports_for_overlay(overlay) -> dict[str, str]
 ```
 
 `EnvironmentService` is responsible for selecting the provider implementation.
 The rest of the control plane should not branch on venv-vs-Docker except at the
-execution adapter boundary.
+execution adapter boundary. Some provider-interface methods such as a generic
+`run_in_environment` are still design targets rather than implemented methods.
 
 All subprocess launch sites should take a resolved environment instead of using
 `sys.executable` directly. This includes:
@@ -821,8 +864,9 @@ EnvironmentProvider.lock(environment) -> dict
 - installs declared Python requirements into an immutable task venv
 - runs import and public-seed preflights before marking the environment ready
 - captures `pip freeze` into `lock_json`
-- exposes `python_path` for `EvaluationService`, `semantic_worker`, tool
-  wrappers, and local jobs
+- exposes `python_path` for `EvaluationService`, `semantic_worker`, and tool
+  wrappers. Local worker-created jobs can carry environment metadata, but
+  default job execution is not yet fully environment-enforced.
 
 `docker_image` provider:
 
@@ -858,9 +902,11 @@ env overlay <overlay-id>
 env approve <overlay-id>
 ```
 
-The server records the request, applies experiment policy, creates the overlay
-when allowed, and updates the worker workspace environment. The overlay id
-becomes part of job, evaluation, artifact, and finding metadata when relevant.
+The server records the request, applies experiment policy, and creates the
+overlay when allowed. The current worker process environment is not hot-swapped;
+the worker must explicitly request/use the overlay for supported operations.
+The overlay id becomes part of evaluation metadata when used and should be
+propagated into job, artifact, and finding metadata when relevant.
 
 Overlay implementation is provider-specific:
 
@@ -907,12 +953,10 @@ reasons, just like blocked jobs.
 Official evaluation defaults to the task base environment.
 
 A worker overlay may be used for `verify` or `probe` when policy allows it.
-Using an overlay for `submit` must be explicit and may be disallowed for
-leaderboard-eligible runs:
-
-```bash
-eval submit --entry initial.py --environment-overlay <overlay-id>
-```
+Using an overlay for `submit` is not implemented in the current official path.
+The CLI flag name reserved for this future path is
+`--environment-overlay-id`, but current `EvaluationService` allows overlays
+only for `verify` and `probe`; `submit` resolves to the task base environment.
 
 Leaderboard-eligible evaluations must record:
 
@@ -923,6 +967,11 @@ overlay_id, if any
 environment_provider
 lock_json or equivalent dependency snapshot
 ```
+
+Current implementation records `environment_id` and `environment_overlay_id` in
+the evaluation request and leaderboard entry, with fingerprint/lock reachable
+through the environment records. Copying the full immutable lock into the
+evaluation/leaderboard result is still future hardening.
 
 If a candidate requires an overlay dependency to run, the result is not fully
 reproducible until that overlay is captured and approved. If the dependency is
@@ -961,7 +1010,7 @@ The server state root defaults to:
 ao_state/
 ```
 
-Current generated server layout:
+Current local control-plane layout:
 
 ```text
 ao_state/
@@ -989,8 +1038,6 @@ ao_state/
         <runtime_fingerprint>/  # local_venv provider storage
     overlays/
       <overlay_id>/             # local_venv overlay storage
-    docker/
-      <environment_id>/         # docker_image metadata/build context cache
 ```
 
 When `EnvironmentService` is not available, the low-level runtime helper can
@@ -1010,14 +1057,19 @@ registry, but their immutable image digests must still be recorded in SQLite.
 ```text
 1. Start Flask control plane.
 2. Create an Experiment with task_id, config, budget, and policy.
-3. EnvironmentService ensures the framework and task base environments.
+3. EnvironmentService ensures the task base environment when the worker or
+   evaluation path needs it. Framework environment records are available through
+   the same service, but the local server still starts from the current Python
+   interpreter.
 4. Generate one or more WorkerAssignments; task research directions are assigned
    round-robin when the task exposes `research_directions/manifest.json`.
 5. Start a local assignment.
-6. WorkerManager creates a WorkerSession and spawns semantic_worker in the
-   resolved framework/task environment.
-7. semantic_worker loads assignment context from the API.
-8. semantic_worker prepares semantic workspace and semantic tool wrappers.
+6. WorkerManager creates a WorkerSession and spawns semantic_worker with
+   assignment/session identifiers.
+7. semantic_worker loads assignment context from the API and resolves the task
+   environment.
+8. semantic_worker prepares semantic workspace and semantic tool wrappers using
+   the resolved task environment.
 9. Codex/App Server receives startup prompt and semantic tools.
 10. Agent edits candidate code and uses ctx/eval/job/artifact/finding/notebook/telemetry/env.
 11. eval submit snapshots the candidate, then creates a server-owned Evaluation
@@ -1039,6 +1091,11 @@ Current gaps:
 - No dedicated Attempt table yet.
 - Environment control has a `local_venv` implementation, durable records, and
   worker-facing `env` tools. The missing provider is `docker_image`.
+- Local worker budget expiry is represented as `stopped` with
+  `stop_reason=turn_timeout`, not as a worker exception. The worker still writes
+  partial traces and checkpoints `WORKLOG.md` when possible.
+- `tasks/circle_packing_26` is the current converted benchmark task; broad task
+  migration remains future work.
 - No product-grade leaderboard publication UI yet; the JSON API and worker
   tools are implemented.
 - No general artifact download API yet; incumbent checkout is implemented for
@@ -1118,8 +1175,9 @@ Current baseline validation:
 
 ```bash
 python3 -m compileall src/agentic_opt
-PYTHONPATH=src python3 -m unittest tests.test_web_backend tests.test_semantic_workspace -v
+PYTHONPATH=src python3 -m unittest tests.test_web_backend tests.test_semantic_workspace tests.test_circle_packing_task -v
 PYTHONPATH=src python3 -m agentic_opt.adapter.semantic_worker --help
 PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli --help
+PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli env --help
 PYTHONPATH=src python3 -m agentic_opt.web.app --help
 ```
