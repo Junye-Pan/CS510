@@ -1,0 +1,22 @@
+{
+  "subset_rank": 3,
+  "id": "norinori_a5fa271ebc387a178a1f81513c6e04f5",
+  "type": "norinori",
+  "width": 8,
+  "height": 8,
+  "size": "8x8",
+  "pzpr_url": "norinori/8/8/9df7mbnebgu0cac5avcaps3g",
+  "puzzlink_url": "http://puzz.link/p?norinori/8/8/9df7mbnebgu0cac5avcaps3g",
+  "ppbench_play_url": "https://ppbench.com/play/norinori_a5fa271ebc387a178a1f81513c6e04f5.html",
+  "local_play_path": "public/ppbench_site/play/norinori_a5fa271ebc387a178a1f81513c6e04f5.html",
+  "source_page_order": 10,
+  "solved_count": 17,
+  "model_attempt_count": 62,
+  "failed_count": 45,
+  "solve_rate_percent": 27.42,
+  "difficulty_bin": "(20,100]",
+  "golden_300_line": 154,
+  "selection_role": "extra_rebalance",
+  "selection_detail": "filled_global_bin_(20,100]",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

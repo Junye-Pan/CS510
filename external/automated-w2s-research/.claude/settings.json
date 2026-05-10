@@ -1,0 +1,70 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO_ROOT=\"${WORKSPACE_DIR:-$(pwd)}\"; LOGS_DIR=\"$REPO_ROOT/w2s_research/research_loop/logs\"; PYTHON=\"$REPO_ROOT/.venv/bin/python\"; [ -x \"$PYTHON\" ] || PYTHON=python3; mkdir -p \"$LOGS_DIR\"; \"$PYTHON\" \"$REPO_ROOT/w2s_research/research_loop/hooks/log_tool_start.py\" >> \"$LOGS_DIR/hook.log\" 2>&1 || true",
+            "timeout": 2000
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO_ROOT=\"${WORKSPACE_DIR:-$(pwd)}\"; LOGS_DIR=\"$REPO_ROOT/w2s_research/research_loop/logs\"; PYTHON=\"$REPO_ROOT/.venv/bin/python\"; [ -x \"$PYTHON\" ] || PYTHON=python3; mkdir -p \"$LOGS_DIR\"; \"$PYTHON\" \"$REPO_ROOT/w2s_research/research_loop/hooks/log_tool_start.py\" >> \"$LOGS_DIR/hook.log\" 2>&1 || true",
+            "timeout": 2000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO_ROOT=\"${WORKSPACE_DIR:-$(pwd)}\"; LOGS_DIR=\"$REPO_ROOT/w2s_research/research_loop/logs\"; PYTHON=\"$REPO_ROOT/.venv/bin/python\"; [ -x \"$PYTHON\" ] || PYTHON=python3; mkdir -p \"$LOGS_DIR\"; \"$PYTHON\" \"$REPO_ROOT/w2s_research/research_loop/hooks/log_tool_usage.py\" >> \"$LOGS_DIR/hook.log\" 2>&1 || true",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO_ROOT=\"${WORKSPACE_DIR:-$(pwd)}\"; LOGS_DIR=\"$REPO_ROOT/w2s_research/research_loop/logs\"; PYTHON=\"$REPO_ROOT/.venv/bin/python\"; [ -x \"$PYTHON\" ] || PYTHON=python3; mkdir -p \"$LOGS_DIR\"; \"$PYTHON\" \"$REPO_ROOT/w2s_research/research_loop/hooks/log_tool_usage.py\" >> \"$LOGS_DIR/hook.log\" 2>&1 || true",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO_ROOT=\"${WORKSPACE_DIR:-$(pwd)}\"; LOGS_DIR=\"$REPO_ROOT/w2s_research/research_loop/logs\"; PYTHON=\"$REPO_ROOT/.venv/bin/python\"; [ -x \"$PYTHON\" ] || PYTHON=python3; mkdir -p \"$LOGS_DIR\"; \"$PYTHON\" \"$REPO_ROOT/w2s_research/research_loop/hooks/sync_to_s3.py\" >> \"$LOGS_DIR/hook.log\" 2>&1 || true",
+            "timeout": 30000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPO_ROOT=\"${WORKSPACE_DIR:-$(pwd)}\"; LOGS_DIR=\"$REPO_ROOT/w2s_research/research_loop/logs\"; PYTHON=\"$REPO_ROOT/.venv/bin/python\"; [ -x \"$PYTHON\" ] || PYTHON=python3; mkdir -p \"$LOGS_DIR\"; \"$PYTHON\" \"$REPO_ROOT/w2s_research/research_loop/hooks/sync_to_s3.py\" >> \"$LOGS_DIR/hook.log\" 2>&1 || true",
+            "timeout": 60000
+          }
+        ]
+      }
+    ]
+  }
+}

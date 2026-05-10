@@ -1,0 +1,22 @@
+{
+  "subset_rank": 33,
+  "id": "shakashaka_67f907e1b1cd4a3a1a8291e10a0ce3a9",
+  "type": "shakashaka",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "shakashaka/10/10/hdicreg.hch.znehd.icr.kb",
+  "puzzlink_url": "https://puzz.link/p?shakashaka/10/10/hdicreg.hch.znehd.icr.kb",
+  "ppbench_play_url": "https://ppbench.com/play/shakashaka_67f907e1b1cd4a3a1a8291e10a0ce3a9.html",
+  "local_play_path": "public/ppbench_site/play/shakashaka_67f907e1b1cd4a3a1a8291e10a0ce3a9.html",
+  "source_page_order": 195,
+  "solved_count": 0,
+  "model_attempt_count": 58,
+  "failed_count": 58,
+  "solve_rate_percent": 0.0,
+  "difficulty_bin": "0",
+  "golden_300_line": 62,
+  "selection_role": "extra_rebalance",
+  "selection_detail": "filled_global_bin_0",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

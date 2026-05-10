@@ -1,0 +1,15 @@
+.venv
+.git
+results
+labeled_data
+data
+cache_results
+w2s_research/web_ui/frontend/node_modules
+w2s_research/web_ui/frontend/build
+w2s_research/research_loop/logs
+w2s_research/research_loop/shared_findings
+w2s_research/web_ui/backend/experiments.db
+__pycache__
+*.pyc
+*.egg-info
+.env

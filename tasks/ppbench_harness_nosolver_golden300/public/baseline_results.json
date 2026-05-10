@@ -1,0 +1,50 @@
+{
+  "task_id": "ppbench_harness_nosolver_golden300",
+  "baseline_name": "minimum_streamed_direct_v1",
+  "entrypoint": "initial.py",
+  "model": "gpt-5.2",
+  "backend": "https://chatgpt.com/backend-api/codex",
+  "transport": "pydantic_ai_streamed_responses",
+  "recorded_at": "2026-04-27T20:24:00Z",
+  "probe10": {
+    "split": "probe10",
+    "resolved": 2,
+    "total": 10,
+    "legal": 10,
+    "invalid": 0,
+    "timeouts": 0,
+    "crashes": 0,
+    "model_calls": 10,
+    "elapsed_s": 1577.2827838340017,
+    "solved_by_type": {
+      "lightup": 1,
+      "nurimisaki": 1
+    }
+  },
+  "private50": {
+    "split": "private50",
+    "resolved": 6,
+    "total": 50,
+    "score": 6.0,
+    "legal": 50,
+    "invalid": 0,
+    "timeouts": 0,
+    "crashes": 0,
+    "model_calls": 50,
+    "elapsed_s": 3831.429953624989,
+    "mean_runtime_s": 282.2473075067025,
+    "recorded_evaluator_concurrency": 4,
+    "current_default_evaluator_concurrency": 10,
+    "solved_by_type": {
+      "hitori": 1,
+      "lightup": 1,
+      "norinori": 3,
+      "nurimisaki": 1
+    }
+  },
+  "interpretation": [
+    "The seed harness is a real nonzero baseline, not an empty stub.",
+    "Optimization should preserve the fixed pydantic_ai streamed Codex transport and improve harness behavior.",
+    "Candidates should normally beat or at least match the probe10 baseline before spending a full private50 submit."
+  ]
+}

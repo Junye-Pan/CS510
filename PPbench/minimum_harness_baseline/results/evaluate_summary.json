@@ -1,0 +1,43 @@
+{
+  "summary": {
+    "attempted_by_type": {
+      "country": 2,
+      "dbchoco": 2,
+      "firefly": 2,
+      "heyawake": 2,
+      "hitori": 3,
+      "kurodoko": 3,
+      "lightup": 2,
+      "lits": 2,
+      "mashu": 2,
+      "norinori": 3,
+      "nurikabe": 3,
+      "nurimaze": 2,
+      "nurimisaki": 3,
+      "sashigane": 3,
+      "shakashaka": 3,
+      "shikaku": 3,
+      "slither": 2,
+      "sudoku": 2,
+      "tapa": 3,
+      "yajilin": 3
+    },
+    "crashes": 0,
+    "elapsed_s": 3831.429953624989,
+    "invalid": 0,
+    "legal": 50,
+    "mean_runtime_s": 282.2473075067025,
+    "model_calls": 50,
+    "resolved": 6,
+    "score": 6.0,
+    "solved_by_type": {
+      "hitori": 1,
+      "lightup": 1,
+      "norinori": 3,
+      "nurimisaki": 1
+    },
+    "split": "private50",
+    "timeouts": 0,
+    "total": 50
+  }
+}

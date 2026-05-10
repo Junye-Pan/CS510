@@ -1,0 +1,22 @@
+{
+  "subset_rank": 43,
+  "id": "sashigane_b275d63e549cf8eebd15d72d6e6fb5ba",
+  "type": "sashigane",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "sashigane/10/10/3lhnjtgp7.lgl5mgpgt5p4mhl6lhgphtin6li",
+  "puzzlink_url": "http://puzz.link/p?sashigane/10/10/3lhnjtgp7.lgl5mgpgt5p4mhl6lhgphtin6li",
+  "ppbench_play_url": "https://ppbench.com/play/sashigane_b275d63e549cf8eebd15d72d6e6fb5ba.html",
+  "local_play_path": "public/ppbench_site/play/sashigane_b275d63e549cf8eebd15d72d6e6fb5ba.html",
+  "source_page_order": 259,
+  "solved_count": 0,
+  "model_attempt_count": 114,
+  "failed_count": 114,
+  "solve_rate_percent": 0.0,
+  "difficulty_bin": "0",
+  "golden_300_line": 208,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_05_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

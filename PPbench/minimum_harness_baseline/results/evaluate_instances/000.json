@@ -1,0 +1,27 @@
+{
+  "completed": 1,
+  "completed_at": "2026-04-27T19:24:58.329923+00:00",
+  "index": 0,
+  "mode": "evaluate",
+  "outcome": {
+    "failure_reason": null,
+    "legal": true,
+    "llm_capable": true,
+    "model_calls": 1,
+    "model_name": "gpt-5.2",
+    "puzzle_type": "nurimisaki",
+    "replay": {
+      "complete": true,
+      "engine_available": true,
+      "error": null,
+      "legal": true,
+      "move_count": 6
+    },
+    "runtime_s": 265.1369691659929,
+    "solved": true,
+    "status": "solved",
+    "valid_contract": true
+  },
+  "split": "private50",
+  "total": 50
+}

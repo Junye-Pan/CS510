@@ -1,0 +1,22 @@
+{
+  "subset_rank": 9,
+  "id": "norinori_7000ac44df733fd9907ad7748d56a72b",
+  "type": "norinori",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "norinori/10/10/ertrpfi3l5aa0i74t9o20a078uv106vv813g",
+  "puzzlink_url": "http://puzz.link/p?norinori/10/10/ertrpfi3l5aa0i74t9o20a078uv106vv813g",
+  "ppbench_play_url": "https://ppbench.com/play/norinori_7000ac44df733fd9907ad7748d56a72b.html",
+  "local_play_path": "public/ppbench_site/play/norinori_7000ac44df733fd9907ad7748d56a72b.html",
+  "source_page_order": 51,
+  "solved_count": 5,
+  "model_attempt_count": 58,
+  "failed_count": 53,
+  "solve_rate_percent": 8.62,
+  "difficulty_bin": "(5,10]",
+  "golden_300_line": 158,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_05_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

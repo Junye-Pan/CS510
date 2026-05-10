@@ -1,0 +1,102 @@
+# Python
+**/__pycache__
+*.egg-info/
+*.pyc
+.pytest_cache/
+
+# Environment
+.env
+.cache/
+.cursor/
+.claude/settings.local.json
+
+# Data & Results (large, user-specific)
+data/
+results/
+cache_results/
+wandb/
+labeled_data/
+*.db
+
+# Training artifacts
+**/unsloth_compiled_cache
+*.pt
+*.bin
+*.safetensors
+
+# Auto-generated idea directories
+w2s_research/ideas/lmgen*
+w2s_research/ideas/autonomous_*
+w2s_research/ideas/Unsupervised-Elicitation/
+w2s_research/ideas/icm/
+w2s_research/ideas.json
+
+# Research loop runtime
+w2s_research/research_loop/findings.json
+w2s_research/research_loop/notebook.json
+w2s_research/research_loop/logs/
+w2s_research/research_loop/shared_findings/
+w2s_research/research_loop/target_idea/
+hook.log
+
+# Web UI runtime
+w2s_research/web_ui/backend/venv/
+w2s_research/web_ui/backend/*.db
+w2s_research/web_ui/backend/*.log
+w2s_research/web_ui/backend/results
+w2s_research/web_ui/backend/wandb
+w2s_research/web_ui/frontend/node_modules/
+w2s_research/web_ui/frontend/build/
+w2s_research/web_ui/frontend/.env.*
+w2s_research/web_ui/frontend/*-debug.log*
+
+# Server runtime (new path)
+w2s_research/server/*.db
+w2s_research/server/*.log
+w2s_research/server/venv/
+w2s_research/server/results
+w2s_research/server/frontend/node_modules/
+w2s_research/server/frontend/build/
+
+# System files
+.DS_Store
+._*
+
+# Development artifacts (not part of release)
+*.zip
+log.txt
+stp/
+setup.py
+merge_lora_checkpoint.py
+*_IMPLEMENTATION_PLAN.yaml
+*_implementation_plan*.yaml
+IMPLEMENTATION_*.md
+IMPLEMENTATION_*.yaml
+*_PLAN.yaml
+*_ANALYSIS.md
+*_REVIEW*.md
+*_REVIEW*.txt
+*_INDEX.md
+*_QUICK_REFERENCE.md
+*_SUMMARY.md
+*_CHECKLIST.md
+ideas_*.json
+test_*.py
+w2s_research/ideation/log_*
+scripts/README_UBUNTU_CMD.md
+scripts/ubuntu-cmd
+scripts/run_tmp.sh
+scripts/run_icm_binary.sh
+scripts/run_icm_icl.sh
+scripts/run_feature_representation.sh
+
+# External projects (cloned separately)
+AI-Scientist-v2/
+CodeClash/
+DeepCode/
+ShinkaEvolve/
+automated-researcher/
+weak-to-strong/
+w2s_research/coding_agent/
+w2s_research/examples/
+w2s_research/visualize/

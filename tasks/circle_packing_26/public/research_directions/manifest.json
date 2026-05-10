@@ -1,0 +1,51 @@
+{
+  "directions": [
+    {
+      "direction_id": "global_seed_generator",
+      "title": "Global Seed Generator",
+      "doc_path": "research_directions/global_seed_generator.md",
+      "cross_direction_snapshot_reasons": ["comparison", "control"],
+      "cross_direction_snapshot_note": "Use other directions' snapshots only as controls or comparison targets. Do not adopt them as your working incumbent.",
+      "startup_note": "This is an exploration slot. Preserve structural diversity. Do not adopt another direction's incumbent as your working candidate; use cross-direction material only as control or comparison."
+    },
+    {
+      "direction_id": "non_row_constructive",
+      "title": "Non-Row Constructive",
+      "doc_path": "research_directions/non_row_constructive.md",
+      "cross_direction_snapshot_reasons": ["comparison", "control"],
+      "cross_direction_snapshot_note": "Use other directions' snapshots only to compare structure or calibrate scores. Keep the main search focused on non-row constructive families.",
+      "startup_note": "This is an exploration slot. Keep the search on genuinely non-row constructive families. Do not switch to another direction's incumbent as the main working candidate."
+    },
+    {
+      "direction_id": "topology_escape",
+      "title": "Topology Escape",
+      "doc_path": "research_directions/topology_escape.md",
+      "cross_direction_snapshot_reasons": ["mutation_source", "comparison", "control"],
+      "cross_direction_snapshot_note": "Other directions' snapshots may be used as mutation sources, controls, or comparison targets, but not as direct incumbent-polish targets. A checked-out foreign snapshot should undergo a real structural edit before it becomes a serious candidate again.",
+      "startup_note": "This is an exploration slot. You may use another direction's snapshot as a mutation source, control, or comparison target, but do not simply adopt its incumbent. Cross-direction reuse should introduce a real structural edit before it becomes a serious candidate again."
+    },
+    {
+      "direction_id": "tolerance_edge_polish",
+      "title": "Tolerance Edge Polish",
+      "doc_path": "research_directions/tolerance_edge_polish.md",
+      "cross_direction_snapshot_reasons": ["follow_best", "repair", "comparison", "control"],
+      "cross_direction_snapshot_note": "This is the dedicated endgame slot. It may follow the strongest public incumbent and spend longer sessions on incumbent polish, export quality, and tolerance-edge variants.",
+      "startup_note": "This is the dedicated endgame slot. It may follow the strongest public incumbent and does not need to preserve direction diversity. Its job is long-horizon incumbent polish, not fresh basin discovery.",
+      "session_profile": {
+        "max_model_turns": 8,
+        "max_evaluator_runs_per_session": 4,
+        "idle_timeout_minutes": 20,
+        "post_submit_turn_idle_interrupt_s": 300,
+        "observed_turn_idle_interrupt_s": 1800
+      }
+    },
+    {
+      "direction_id": "incumbent_repair",
+      "title": "Incumbent Repair",
+      "doc_path": "research_directions/incumbent_repair.md",
+      "cross_direction_snapshot_reasons": ["repair", "comparison", "control"],
+      "cross_direction_snapshot_note": "Use other directions' snapshots only when the goal is repair, validation, or comparison. This is not the dedicated public-incumbent follower when tolerance_edge_polish is present.",
+      "startup_note": "This slot focuses on repair and score recovery on a basin you already own. Prefer strict-safe recovery and diagnostics; do not act as a general cross-direction incumbent adopter."
+    }
+  ]
+}

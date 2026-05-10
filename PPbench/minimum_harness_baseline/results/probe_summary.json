@@ -1,0 +1,29 @@
+{
+  "summary": {
+    "attempted_by_type": {
+      "firefly": 1,
+      "hitori": 1,
+      "lightup": 1,
+      "lits": 1,
+      "mashu": 1,
+      "norinori": 1,
+      "nurimisaki": 1,
+      "shikaku": 1,
+      "tapa": 1,
+      "yajilin": 1
+    },
+    "crashes": 0,
+    "elapsed_s": 1577.2827838340017,
+    "invalid": 0,
+    "legal": 10,
+    "model_calls": 10,
+    "resolved": 2,
+    "solved_by_type": {
+      "lightup": 1,
+      "nurimisaki": 1
+    },
+    "split": "probe10",
+    "timeouts": 0,
+    "total": 10
+  }
+}

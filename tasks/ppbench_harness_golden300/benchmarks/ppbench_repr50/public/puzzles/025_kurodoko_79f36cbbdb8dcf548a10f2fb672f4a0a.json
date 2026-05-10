@@ -1,0 +1,22 @@
+{
+  "subset_rank": 25,
+  "id": "kurodoko_79f36cbbdb8dcf548a10f2fb672f4a0a",
+  "type": "kurodoko",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "kurodoko/10/10/3h2h5h3r3j6h2n5z8n2h3j4r6h2h5h2",
+  "puzzlink_url": "https://puzz.link/p?kurodoko/10/10/3h2h5h3r3j6h2n5z8n2h3j4r6h2h5h2",
+  "ppbench_play_url": "https://ppbench.com/play/kurodoko_79f36cbbdb8dcf548a10f2fb672f4a0a.html",
+  "local_play_path": "public/ppbench_site/play/kurodoko_79f36cbbdb8dcf548a10f2fb672f4a0a.html",
+  "source_page_order": 143,
+  "solved_count": 1,
+  "model_attempt_count": 58,
+  "failed_count": 57,
+  "solve_rate_percent": 1.72,
+  "difficulty_bin": "(1,2.5]",
+  "golden_300_line": 261,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_11_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

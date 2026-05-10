@@ -1,0 +1,22 @@
+{
+  "subset_rank": 45,
+  "id": "nurimaze_2e9e60aaf92af45d1ca649b1e8f51150",
+  "type": "nurimaze",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "nurimaze/10/10/vfvuvvvfbuvtevvvvuvvvfvfrvtvvvnvn7vf4e3536364b3c4734a3718453h3c4a439246",
+  "puzzlink_url": "http://puzz.link/p?nurimaze/10/10/vfvuvvvfbuvtevvvvuvvvfvfrvtvvvnvn7vf4e3536364b3c4734a3718453h3c4a439246",
+  "ppbench_play_url": "https://ppbench.com/play/nurimaze_2e9e60aaf92af45d1ca649b1e8f51150.html",
+  "local_play_path": "public/ppbench_site/play/nurimaze_2e9e60aaf92af45d1ca649b1e8f51150.html",
+  "source_page_order": 272,
+  "solved_count": 0,
+  "model_attempt_count": 58,
+  "failed_count": 58,
+  "solve_rate_percent": 0.0,
+  "difficulty_bin": "0",
+  "golden_300_line": 237,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_05_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

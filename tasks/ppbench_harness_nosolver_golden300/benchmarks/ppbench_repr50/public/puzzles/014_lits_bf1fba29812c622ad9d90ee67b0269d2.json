@@ -1,0 +1,22 @@
+{
+  "subset_rank": 14,
+  "id": "lits_bf1fba29812c622ad9d90ee67b0269d2",
+  "type": "lits",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "lits/10/10/95dq4pviqabahade14d82md8ul5auuaml6eg",
+  "puzzlink_url": "https://puzz.link/p?lits/10/10/95dq4pviqabahade14d82md8ul5auuaml6eg",
+  "ppbench_play_url": "https://ppbench.com/play/lits_bf1fba29812c622ad9d90ee67b0269d2.html",
+  "local_play_path": "public/ppbench_site/play/lits_bf1fba29812c622ad9d90ee67b0269d2.html",
+  "source_page_order": 93,
+  "solved_count": 2,
+  "model_attempt_count": 58,
+  "failed_count": 56,
+  "solve_rate_percent": 3.45,
+  "difficulty_bin": "(2.5,5]",
+  "golden_300_line": 97,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_05_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

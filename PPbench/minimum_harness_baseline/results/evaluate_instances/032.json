@@ -1,0 +1,27 @@
+{
+  "completed": 30,
+  "completed_at": "2026-04-27T20:10:39.194832+00:00",
+  "index": 32,
+  "mode": "evaluate",
+  "outcome": {
+    "failure_reason": null,
+    "legal": true,
+    "llm_capable": true,
+    "model_calls": 1,
+    "model_name": "gpt-5.2",
+    "puzzle_type": "shakashaka",
+    "replay": {
+      "complete": false,
+      "engine_available": true,
+      "error": null,
+      "legal": true,
+      "move_count": 1
+    },
+    "runtime_s": 6.896489791019121,
+    "solved": false,
+    "status": "solved",
+    "valid_contract": true
+  },
+  "split": "private50",
+  "total": 50
+}

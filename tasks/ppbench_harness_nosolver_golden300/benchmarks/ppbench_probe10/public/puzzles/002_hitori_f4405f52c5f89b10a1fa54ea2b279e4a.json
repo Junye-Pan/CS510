@@ -1,0 +1,23 @@
+{
+  "probe_rank": 2,
+  "repr50_subset_rank": 2,
+  "id": "hitori_f4405f52c5f89b10a1fa54ea2b279e4a",
+  "type": "hitori",
+  "width": 11,
+  "height": 10,
+  "size": "11x10",
+  "pzpr_url": "hitori/11/10/2b17123259583b698a764b75327b56287428b368ab69a141532195317984768731362985b5428b475297b8725853b14931a6964a4131b6",
+  "puzzlink_url": "https://puzz.link/p?hitori/11/10/2b17123259583b698a764b75327b56287428b368ab69a141532195317984768731362985b5428b475297b8725853b14931a6964a4131b6",
+  "ppbench_play_url": "https://ppbench.com/play/hitori_f4405f52c5f89b10a1fa54ea2b279e4a.html",
+  "local_play_path": "public/ppbench_site/play/hitori_f4405f52c5f89b10a1fa54ea2b279e4a.html",
+  "source_page_order": 9,
+  "solved_count": 16,
+  "model_attempt_count": 58,
+  "failed_count": 42,
+  "solve_rate_percent": 27.59,
+  "difficulty_bin": "(20,100]",
+  "golden_300_line": 299,
+  "selection_role": "type_representative",
+  "selection_detail": "repr50_highest_solve_rate_in_type",
+  "selection_note": "Selected for probe10 as the easiest representative of one type inside repr50."
+}

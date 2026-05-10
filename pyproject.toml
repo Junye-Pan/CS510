@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-opt"
+version = "0.1.0"
+description = "Rewrite-in-progress scaffold for an agentic optimization system"
+readme = "docs/implementation_plan_codex.md"
+requires-python = ">=3.11"
+dependencies = ["Flask>=3.0", "numpy>=1.23", "scipy>=1.10"]
+
+[project.optional-dependencies]
+providers = ["boto3>=1.28.0", "mlflow>=2.0.0"]
+
+[project.scripts]
+agentic-opt-web = "agentic_opt.web.app:main"
+agentic-opt-worker-tool = "agentic_opt.worker_tools.semantic_cli:main"
+agentic-opt-semantic-worker = "agentic_opt.adapter.semantic_worker:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agentic_opt*"]

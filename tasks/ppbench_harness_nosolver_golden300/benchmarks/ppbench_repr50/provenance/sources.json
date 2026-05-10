@@ -1,0 +1,9 @@
+{
+  "generated_at": "2026-04-23",
+  "ppbench_home": "https://ppbench.com/",
+  "ppbench_puzzle_browser": "https://ppbench.com/puzzles.html",
+  "ppbench_repository": "https://github.com/approximatelabs/pencil-puzzle-bench",
+  "bundled_dataset_source": "ppbench/bundled/golden_300.jsonl",
+  "selection_input_count": 300,
+  "selected_count": 50
+}

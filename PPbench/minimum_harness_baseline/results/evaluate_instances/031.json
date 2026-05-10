@@ -1,0 +1,27 @@
+{
+  "completed": 31,
+  "completed_at": "2026-04-27T20:10:40.169399+00:00",
+  "index": 31,
+  "mode": "evaluate",
+  "outcome": {
+    "failure_reason": null,
+    "legal": true,
+    "llm_capable": true,
+    "model_calls": 1,
+    "model_name": "gpt-5.2",
+    "puzzle_type": "mashu",
+    "replay": {
+      "complete": false,
+      "engine_available": true,
+      "error": null,
+      "legal": true,
+      "move_count": 4
+    },
+    "runtime_s": 7.884098084003199,
+    "solved": false,
+    "status": "solved",
+    "valid_contract": true
+  },
+  "split": "private50",
+  "total": 50
+}

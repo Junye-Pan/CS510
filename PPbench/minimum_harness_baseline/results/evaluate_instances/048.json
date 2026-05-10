@@ -1,0 +1,27 @@
+{
+  "completed": 46,
+  "completed_at": "2026-04-27T20:15:24.192518+00:00",
+  "index": 48,
+  "mode": "evaluate",
+  "outcome": {
+    "failure_reason": null,
+    "legal": true,
+    "llm_capable": true,
+    "model_calls": 1,
+    "model_name": "gpt-5.2",
+    "puzzle_type": "country",
+    "replay": {
+      "complete": false,
+      "engine_available": true,
+      "error": null,
+      "legal": true,
+      "move_count": 1
+    },
+    "runtime_s": 8.275834957981715,
+    "solved": false,
+    "status": "solved",
+    "valid_contract": true
+  },
+  "split": "private50",
+  "total": 50
+}

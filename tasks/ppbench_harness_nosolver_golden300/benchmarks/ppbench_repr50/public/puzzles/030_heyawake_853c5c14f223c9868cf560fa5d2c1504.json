@@ -1,0 +1,22 @@
+{
+  "subset_rank": 30,
+  "id": "heyawake_853c5c14f223c9868cf560fa5d2c1504",
+  "type": "heyawake",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "heyawake/10/10/akl9agk182g51ail5a00o3uf00vv00ufo3002g42i43243g1h12",
+  "puzzlink_url": "https://puzz.link/p?heyawake/10/10/akl9agk182g51ail5a00o3uf00vv00ufo3002g42i43243g1h12",
+  "ppbench_play_url": "https://ppbench.com/play/heyawake_853c5c14f223c9868cf560fa5d2c1504.html",
+  "local_play_path": "public/ppbench_site/play/heyawake_853c5c14f223c9868cf560fa5d2c1504.html",
+  "source_page_order": 181,
+  "solved_count": 0,
+  "model_attempt_count": 58,
+  "failed_count": 58,
+  "solve_rate_percent": 0.0,
+  "difficulty_bin": "0",
+  "golden_300_line": 37,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_05_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

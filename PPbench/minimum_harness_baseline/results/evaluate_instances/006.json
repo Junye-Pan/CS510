@@ -1,0 +1,27 @@
+{
+  "completed": 6,
+  "completed_at": "2026-04-27T19:31:37.857523+00:00",
+  "index": 6,
+  "mode": "evaluate",
+  "outcome": {
+    "failure_reason": null,
+    "legal": true,
+    "llm_capable": true,
+    "model_calls": 1,
+    "model_name": "gpt-5.2",
+    "puzzle_type": "hitori",
+    "replay": {
+      "complete": false,
+      "engine_available": true,
+      "error": null,
+      "legal": true,
+      "move_count": 19
+    },
+    "runtime_s": 345.97681075002765,
+    "solved": false,
+    "status": "solved",
+    "valid_contract": true
+  },
+  "split": "private50",
+  "total": 50
+}

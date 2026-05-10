@@ -1,0 +1,23 @@
+{
+  "probe_rank": 4,
+  "repr50_subset_rank": 5,
+  "id": "lightup_21a0cc6754217bcec60369fc9f0f6ac1",
+  "type": "lightup",
+  "width": 9,
+  "height": 9,
+  "size": "9x9",
+  "pzpr_url": "akari/9/9/paibids78asbidicn",
+  "puzzlink_url": "http://puzz.link/p?akari/9/9/paibids78asbidicn",
+  "ppbench_play_url": "https://ppbench.com/play/lightup_21a0cc6754217bcec60369fc9f0f6ac1.html",
+  "local_play_path": "public/ppbench_site/play/lightup_21a0cc6754217bcec60369fc9f0f6ac1.html",
+  "source_page_order": 29,
+  "solved_count": 9,
+  "model_attempt_count": 58,
+  "failed_count": 49,
+  "solve_rate_percent": 15.52,
+  "difficulty_bin": "(10,20]",
+  "golden_300_line": 116,
+  "selection_role": "type_representative",
+  "selection_detail": "repr50_highest_solve_rate_in_type",
+  "selection_note": "Selected for probe10 as the easiest representative of one type inside repr50."
+}

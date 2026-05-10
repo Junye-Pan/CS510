@@ -1,0 +1,168 @@
+{
+  "entry": "/Users/tiger/Documents/CS598/agentic optimization/PPbench/minimum_harness_baseline/candidate/initial.py",
+  "env": {
+    "AO_PPBENCH_EVALUATE_CONCURRENCY": "4",
+    "AO_PPBENCH_MAX_MODEL_CALLS": "1",
+    "AO_PPBENCH_PROBE_CONCURRENCY": "4",
+    "MODEL_NAME": "gpt-5.2",
+    "OPENAI_BASE_URL": "https://chatgpt.com/backend-api/codex"
+  },
+  "mode": "evaluate",
+  "payload": {
+    "correct": {
+      "correct": true,
+      "error": null
+    },
+    "evaluator": {
+      "public_details": {
+        "concurrency": 4,
+        "crash_count": 0,
+        "fixed_model_name": "gpt-5.2",
+        "invalid_count": 0,
+        "legal_count": 50,
+        "private_details_redacted": true,
+        "solved_count": 6,
+        "split": "private50",
+        "timeout_count": 0,
+        "total_count": 50
+      },
+      "score": 6.0
+    },
+    "extra": {
+      "aggregate": {
+        "attempted_by_type": {
+          "country": 2,
+          "dbchoco": 2,
+          "firefly": 2,
+          "heyawake": 2,
+          "hitori": 3,
+          "kurodoko": 3,
+          "lightup": 2,
+          "lits": 2,
+          "mashu": 2,
+          "norinori": 3,
+          "nurikabe": 3,
+          "nurimaze": 2,
+          "nurimisaki": 3,
+          "sashigane": 3,
+          "shakashaka": 3,
+          "shikaku": 3,
+          "slither": 2,
+          "sudoku": 2,
+          "tapa": 3,
+          "yajilin": 3
+        },
+        "crash_count": 0,
+        "dependency_available": true,
+        "elapsed_s": 3831.429953624989,
+        "evaluator_concurrency": 4,
+        "fixed_model_name": "gpt-5.2",
+        "invalid_count": 0,
+        "legal_count": 50,
+        "mean_runtime_s": 282.2473075067025,
+        "model_calls": 50,
+        "solved_by_type": {
+          "hitori": 1,
+          "lightup": 1,
+          "norinori": 3,
+          "nurimisaki": 1
+        },
+        "solved_count": 6,
+        "timeout_count": 0,
+        "total_count": 50,
+        "total_runtime_s": 14112.365375335125
+      },
+      "private_details_redacted": true,
+      "split": "private50"
+    },
+    "metrics": {
+      "attempted_by_type": {
+        "country": 2,
+        "dbchoco": 2,
+        "firefly": 2,
+        "heyawake": 2,
+        "hitori": 3,
+        "kurodoko": 3,
+        "lightup": 2,
+        "lits": 2,
+        "mashu": 2,
+        "norinori": 3,
+        "nurikabe": 3,
+        "nurimaze": 2,
+        "nurimisaki": 3,
+        "sashigane": 3,
+        "shakashaka": 3,
+        "shikaku": 3,
+        "slither": 2,
+        "sudoku": 2,
+        "tapa": 3,
+        "yajilin": 3
+      },
+      "crash_count": 0,
+      "dependency_available": true,
+      "elapsed_s": 3831.429953624989,
+      "evaluator_concurrency": 4,
+      "fixed_model_name": "gpt-5.2",
+      "invalid_count": 0,
+      "legal_count": 50,
+      "mean_runtime_s": 282.2473075067025,
+      "model_calls": 50,
+      "solved_by_type": {
+        "hitori": 1,
+        "lightup": 1,
+        "norinori": 3,
+        "nurimisaki": 1
+      },
+      "solved_count": 6,
+      "timeout_count": 0,
+      "total_count": 50,
+      "total_runtime_s": 14112.365375335125
+    },
+    "score": 6.0,
+    "valid": true
+  },
+  "started_at": "2026-04-27T20:24:24.627249+00:00",
+  "summary": {
+    "attempted_by_type": {
+      "country": 2,
+      "dbchoco": 2,
+      "firefly": 2,
+      "heyawake": 2,
+      "hitori": 3,
+      "kurodoko": 3,
+      "lightup": 2,
+      "lits": 2,
+      "mashu": 2,
+      "norinori": 3,
+      "nurikabe": 3,
+      "nurimaze": 2,
+      "nurimisaki": 3,
+      "sashigane": 3,
+      "shakashaka": 3,
+      "shikaku": 3,
+      "slither": 2,
+      "sudoku": 2,
+      "tapa": 3,
+      "yajilin": 3
+    },
+    "crashes": 0,
+    "elapsed_s": 3831.429953624989,
+    "invalid": 0,
+    "legal": 50,
+    "mean_runtime_s": 282.2473075067025,
+    "model_calls": 50,
+    "resolved": 6,
+    "score": 6.0,
+    "solved_by_type": {
+      "hitori": 1,
+      "lightup": 1,
+      "norinori": 3,
+      "nurimisaki": 1
+    },
+    "split": "private50",
+    "timeouts": 0,
+    "total": 50
+  },
+  "task_id": "ppbench_harness_golden300",
+  "wall_elapsed_s": 3832.3318206669937
+}

@@ -1,0 +1,165 @@
+# Hydra searchpath: relative paths are resolved from current working directory
+# The code changes to workspace root before initializing Hydra, so this path
+# resolves to verl/verl/trainer/config from the workspace root
+# Use dir:// for directories (file:// also works but dir:// is more semantically correct)
+hydra:
+  searchpath:
+    - pkg://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Algorithm configuration
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+
+# Data configuration
+# Note: train_batch_size and max_response_length are overridden dynamically
+data:
+  train_batch_size: 32  # Default, will be overridden
+  val_batch_size: null
+  max_prompt_length: 4096
+  max_response_length: 1024  # Default, will be overridden
+  prompt_key: prompt
+  reward_fn_key: data_source
+  dataloader_num_workers: 16
+  return_raw_chat: true
+
+# Actor and rollout configuration
+# Note: model.path, lora_rank, lora_alpha, rollout_n, temperature, top_p, response_length are overridden dynamically
+actor_rollout_ref:
+  model:
+    path: null  # Will be overridden
+    tokenizer_path: null
+    lora_rank: 32  # Default, will be overridden
+    lora_alpha: 32  # Default, will be overridden
+    target_modules: all-linear
+    exclude_modules: null
+    enable_gradient_checkpointing: true
+    override_config:
+      attn_implementation: eager
+  
+  actor:
+    strategy: fsdp2
+    ppo_micro_batch_size: null
+    ppo_micro_batch_size_per_gpu: 2  # Reduced from 4 to 2 (balance between memory and speed)
+    ppo_mini_batch_size: 32  # Default, will be overridden
+    ppo_max_token_len_per_gpu: 32768
+    rollout_n: 8  # Default, will be overridden
+    use_kl_loss: false  # Default, will be overridden
+    kl_loss_coef: 0.0  # Default, will be overridden
+    optim:
+      lr: 5e-5  # Default, will be overridden
+      lr_scheduler_type: constant  # Default, will be overridden
+      lr_warmup_steps_ratio: 0.0  # Default, will be overridden
+    checkpoint:
+      save_contents: [model]
+      load_contents: [model]
+    fsdp_config:
+      strategy: fsdp2
+      dtype: bfloat16
+      fsdp_size: -1
+  
+  rollout:
+    name: vllm
+    mode: async  # Enable async mode to use RewardLoopManager (FAPO approach)
+    n: 8  # Default, will be overridden
+    load_format: safetensors
+    gpu_memory_utilization: 0.5
+    tensor_model_parallel_size: 1
+    data_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    temperature: 1.0  # Default, will be overridden
+    top_p: 0.99  # Default, will be overridden
+    top_k: null  # Optional, will be overridden if provided
+    # Note: min_p and presence_penalty are not supported by VERL's RolloutConfig
+    repetition_penalty: 1.0  # Default, will be overridden if != 1.0
+    response_length: 1024  # Default, will be overridden
+    max_num_batched_tokens: 32768  # Must be >= (max_prompt_length + response_length) * rollout_n for batching
+    # With max_prompt_length=4096, response_length=1024, rollout_n=8: need ~40960, but 32768 allows ~6 at max or more at typical lengths
+    log_prob_micro_batch_size_per_gpu: 1
+    trace:
+      backend: weave
+      token2text: true
+      max_samples_per_step_per_worker: 5
+  
+  # Reference model configuration (required when use_kl_loss=True)
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_max_token_len_per_gpu: 32768
+    fsdp_config:
+      param_offload: true  # Offload parameters to save memory
+
+# Reward model configuration (GenRM in colocate mode)
+# Note: model.path, model.input_tokenizer, rollout.prompt_length are overridden dynamically
+reward_model:
+  _target_: verl.workers.config.RewardModelConfig
+  enable: true
+  use_reward_loop: true  # Enable RewardLoopWorker in AgentLoopWorker
+  enable_resource_pool: false  # Colocate mode - share GPU with actor
+  nnodes: 1
+  n_gpus_per_node: 1
+  micro_batch_size_per_gpu: 1
+  reward_manager: naive  # Uses NaiveRewardLoopManager (experimental system)
+
+  model:
+    path: null  # Will be overridden
+    input_tokenizer: null  # Will be overridden
+  
+  rollout:
+    _target_: verl.workers.config.RolloutConfig
+    name: vllm
+    gpu_memory_utilization: 0.1
+    tensor_model_parallel_size: 1
+    data_parallel_size: 1
+    free_cache_engine: true  # Enable sleep/wakeup for memory management
+    skip_tokenizer_init: false
+    enforce_eager: true
+    prompt_length: 10240  # Default, will be overridden
+    response_length: 10  # Just need A or B
+    max_num_batched_tokens: 16384  # Must be >= prompt_length + response_length to allow batching
+    dtype: bfloat16
+
+# Trainer configuration
+# Note: experiment_name, default_local_dir, total_epochs, save_freq, total_training_steps are overridden dynamically
+trainer:
+  project_name: generalization
+  experiment_name: grpo
+  default_local_dir: null  # Will be overridden
+  val_before_train: false
+  test_freq: -1
+  resume_mode: disable
+  logger: [console, wandb]
+  n_gpus_per_node: 1
+  total_epochs: 1  # Default, will be overridden
+  save_freq: 50  # Default, will be overridden
+  total_training_steps: null  # Optional, will be overridden if provided
+
+
+# Ray configuration
+ray_kwargs:
+  ray_init:
+    ignore_reinit_error: true
+    include_dashboard: false
+    num_cpus: 16  # Reduced from 32 to allow 8 parallel experiments (8×16=128 CPUs)
+    num_gpus: 1  # Will be set dynamically based on CUDA availability
+    runtime_env:
+      env_vars:
+        TOKENIZERS_PARALLELISM: "true"
+        NCCL_DEBUG: "WARN"
+        VLLM_USE_V1: "1"
+        PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"  # Required for vLLM v1 (VERL requires v1)
+        # Note: TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 removed - causes vLLM compile failure in vLLM < 0.12
+        # See: https://github.com/vllm-project/vllm/issues/21858
+        # PYTHONPATH not needed - reward function loaded via spec_from_file_location (standalone module)
+
+# Custom reward function configuration
+# Note: path is overridden dynamically
+custom_reward_function:
+  path: null  # Will be overridden
+  name: compute_score
+  reward_kwargs: {}  # Will be set dynamically
+

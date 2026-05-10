@@ -1,0 +1,22 @@
+{
+  "subset_rank": 17,
+  "id": "shikaku_bbbf78ccee988f9c5d13024df1a952c5",
+  "type": "shikaku",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "shikaku/10/10/i4h42h6n4h2g3k4j2g6g3g4g4r4g2g4g3g6j2k3g9h2n2h63h6i",
+  "puzzlink_url": "http://puzz.link/p?shikaku/10/10/i4h42h6n4h2g3k4j2g6g3g4g4r4g2g4g3g6j2k3g9h2n2h63h6i",
+  "ppbench_play_url": "https://ppbench.com/play/shikaku_bbbf78ccee988f9c5d13024df1a952c5.html",
+  "local_play_path": "public/ppbench_site/play/shikaku_bbbf78ccee988f9c5d13024df1a952c5.html",
+  "source_page_order": 98,
+  "solved_count": 2,
+  "model_attempt_count": 58,
+  "failed_count": 56,
+  "solve_rate_percent": 3.45,
+  "difficulty_bin": "(2.5,5]",
+  "golden_300_line": 142,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_05_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

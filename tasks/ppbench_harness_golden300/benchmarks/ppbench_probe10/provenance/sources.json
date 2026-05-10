@@ -1,0 +1,8 @@
+{
+  "generated_at": "2026-04-23",
+  "parent_benchmark": "benchmarks/ppbench_repr50",
+  "ppbench_home": "https://ppbench.com/",
+  "ppbench_puzzle_browser": "https://ppbench.com/puzzles.html",
+  "ppbench_repository": "https://github.com/approximatelabs/pencil-puzzle-bench",
+  "selected_count": 10
+}

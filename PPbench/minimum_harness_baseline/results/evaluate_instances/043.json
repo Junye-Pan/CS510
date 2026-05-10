@@ -1,0 +1,27 @@
+{
+  "completed": 41,
+  "completed_at": "2026-04-27T20:14:42.688535+00:00",
+  "index": 43,
+  "mode": "evaluate",
+  "outcome": {
+    "failure_reason": null,
+    "legal": true,
+    "llm_capable": true,
+    "model_calls": 1,
+    "model_name": "gpt-5.2",
+    "puzzle_type": "sudoku",
+    "replay": {
+      "complete": false,
+      "engine_available": true,
+      "error": null,
+      "legal": true,
+      "move_count": 71
+    },
+    "runtime_s": 11.033806207997259,
+    "solved": false,
+    "status": "solved",
+    "valid_contract": true
+  },
+  "split": "private50",
+  "total": 50
+}

@@ -1,0 +1,153 @@
+{
+  "benchmark_id": "ppbench_repr50",
+  "title": "PPBench Pencil Puzzle Repr50",
+  "created_at": "2026-04-23",
+  "description": "Fifty PPBench puzzles selected to preserve the broad type coverage and public solve-rate shape of the full curated 300-puzzle split.",
+  "sources": {
+    "ppbench_home": "https://ppbench.com/",
+    "ppbench_puzzle_browser": "https://ppbench.com/puzzles.html",
+    "ppbench_repository": "https://github.com/approximatelabs/pencil-puzzle-bench"
+  },
+  "selection_rule": {
+    "candidate_pool": "The 300 puzzles listed by the public PPBench puzzle browser on 2026-04-23.",
+    "type_structure": "20 puzzle types with 15 puzzles per type.",
+    "base_selection": "Per type, sort by solve_rate_percent ascending and select within-type ranks 5 and 11 (1-indexed).",
+    "rebalance_selection": "Use a dynamic-programming pass to add one extra puzzle to 10 types so the 50-puzzle subset matches the target solve-rate histogram.",
+    "target_difficulty_bins": {
+      "0": 23,
+      "(0,1]": 1,
+      "(1,2.5]": 7,
+      "(2.5,5]": 6,
+      "(5,10]": 5,
+      "(10,20]": 5,
+      "(20,100]": 3
+    },
+    "extra_selection_bins": {
+      "0": 5,
+      "(5,10]": 2,
+      "(20,100]": 3
+    },
+    "result": "10 types contribute 3 puzzles and 10 types contribute 2 puzzles."
+  },
+  "leakage_policy": {
+    "public_material": "Puzzle type, dimensions, sanitized local play HTML path, PPBench play URL, Puzz.Link pzpr URL, and public aggregate model-solve statistics.",
+    "private_material": "private/answer_key.jsonl contains evaluator-only official encoded answer material matched to the selected puzzle ids.",
+    "agent_exposure_rule": "Expose public/ to solving agents. Do not expose private/ or raw PPBench bundled jsonl files to solving agents.",
+    "omitted_from_public": "Official answers, encoded answers, move traces, run artifacts, replay links, AI result tables, and per-run timing data."
+  },
+  "summary": {
+    "puzzle_count": 50,
+    "type_counts": {
+      "country": 2,
+      "dbchoco": 2,
+      "firefly": 2,
+      "heyawake": 2,
+      "hitori": 3,
+      "kurodoko": 3,
+      "lightup": 2,
+      "lits": 2,
+      "mashu": 2,
+      "norinori": 3,
+      "nurikabe": 3,
+      "nurimaze": 2,
+      "nurimisaki": 3,
+      "sashigane": 3,
+      "shakashaka": 3,
+      "shikaku": 3,
+      "slither": 2,
+      "sudoku": 2,
+      "tapa": 3,
+      "yajilin": 3
+    },
+    "difficulty_bin_counts": {
+      "0": 23,
+      "(0,1]": 1,
+      "(1,2.5]": 7,
+      "(2.5,5]": 6,
+      "(5,10]": 5,
+      "(10,20]": 5,
+      "(20,100]": 3
+    },
+    "full_split_type_counts": {
+      "country": 15,
+      "dbchoco": 15,
+      "firefly": 15,
+      "heyawake": 15,
+      "hitori": 15,
+      "kurodoko": 15,
+      "lightup": 15,
+      "lits": 15,
+      "mashu": 15,
+      "norinori": 15,
+      "nurikabe": 15,
+      "nurimaze": 15,
+      "nurimisaki": 15,
+      "sashigane": 15,
+      "shakashaka": 15,
+      "shikaku": 15,
+      "slither": 15,
+      "sudoku": 15,
+      "tapa": 15,
+      "yajilin": 15
+    },
+    "full_split_difficulty_bin_counts": {
+      "0": 137,
+      "(0,1]": 4,
+      "(1,2.5]": 43,
+      "(2.5,5]": 34,
+      "(5,10]": 34,
+      "(10,20]": 29,
+      "(20,100]": 19
+    },
+    "mean_solve_rate_percent_full_300": 4.6125,
+    "mean_solve_rate_percent_repr50": 4.3532
+  },
+  "layout": {
+    "public_manifest": "public/manifest.json",
+    "public_puzzles_json": "public/puzzles.json",
+    "public_puzzles_jsonl": "public/puzzles.jsonl",
+    "public_puzzle_files": "public/puzzles/",
+    "public_prompt_files": "public/prompts/",
+    "private_answer_key": "private/answer_key.jsonl",
+    "provenance": "provenance/",
+    "local_play_site": "public/ppbench_site/"
+  },
+  "public_schema": {
+    "required_fields": [
+      "subset_rank",
+      "id",
+      "type",
+      "width",
+      "height",
+      "size",
+      "pzpr_url",
+      "puzzlink_url",
+      "ppbench_play_url",
+      "local_play_path",
+      "source_page_order",
+      "solved_count",
+      "model_attempt_count",
+      "failed_count",
+      "solve_rate_percent",
+      "difficulty_bin",
+      "golden_300_line",
+      "selection_role",
+      "selection_detail",
+      "selection_note"
+    ]
+  },
+  "private_schema": {
+    "answer_key_fields": [
+      "subset_rank",
+      "id",
+      "pid",
+      "puzzlink_url",
+      "solution_enc",
+      "number_required_moves",
+      "number_total_solution_moves",
+      "golden_300_line",
+      "source",
+      "metadata"
+    ]
+  }
+}

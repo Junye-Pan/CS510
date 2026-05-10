@@ -1,0 +1,22 @@
+{
+  "subset_rank": 36,
+  "id": "nurikabe_bd600b8a08c8637fe45f34e42d1081c6",
+  "type": "nurikabe",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "nurikabe/10/10/m6w5g2l5p4n1i5v4g7rao",
+  "puzzlink_url": "https://puzz.link/p?nurikabe/10/10/m6w5g2l5p4n1i5v4g7rao",
+  "ppbench_play_url": "https://ppbench.com/play/nurikabe_bd600b8a08c8637fe45f34e42d1081c6.html",
+  "local_play_path": "public/ppbench_site/play/nurikabe_bd600b8a08c8637fe45f34e42d1081c6.html",
+  "source_page_order": 209,
+  "solved_count": 0,
+  "model_attempt_count": 58,
+  "failed_count": 58,
+  "solve_rate_percent": 0.0,
+  "difficulty_bin": "0",
+  "golden_300_line": 76,
+  "selection_role": "extra_rebalance",
+  "selection_detail": "filled_global_bin_0",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

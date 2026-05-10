@@ -1,0 +1,23 @@
+{
+  "probe_rank": 10,
+  "repr50_subset_rank": 18,
+  "id": "firefly_cd7e7c0e3dfde391ceb850c3fc94b2ca",
+  "type": "firefly",
+  "width": 7,
+  "height": 8,
+  "size": "7x8",
+  "pzpr_url": "firefly/7/8/a4.f4.f4.e4.h1.y",
+  "puzzlink_url": "http://puzz.link/p?firefly/7/8/a4.f4.f4.e4.h1.y",
+  "ppbench_play_url": "https://ppbench.com/play/firefly_cd7e7c0e3dfde391ceb850c3fc94b2ca.html",
+  "local_play_path": "public/ppbench_site/play/firefly_cd7e7c0e3dfde391ceb850c3fc94b2ca.html",
+  "source_page_order": 110,
+  "solved_count": 2,
+  "model_attempt_count": 62,
+  "failed_count": 60,
+  "solve_rate_percent": 3.23,
+  "difficulty_bin": "(2.5,5]",
+  "golden_300_line": 183,
+  "selection_role": "type_representative",
+  "selection_detail": "repr50_highest_solve_rate_in_type",
+  "selection_note": "Selected for probe10 as the easiest representative of one type inside repr50."
+}

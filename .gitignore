@@ -1,0 +1,40 @@
+# Local environments and run outputs
+.ao_envs/
+runs/
+PPbench/harness_opt_*_attempt*/
+
+# Python caches and test artifacts
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Dependency folders
+**/node_modules/
+
+# Logs, local databases, and temporary files
+logs/
+tmp/
+.tmp/
+*.log
+*.tmp
+*.temp
+*.sqlite
+*.sqlite3
+*.db
+
+# OS/editor files
+.DS_Store
+._*
+*.swp

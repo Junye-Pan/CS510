@@ -1,0 +1,22 @@
+{
+  "subset_rank": 28,
+  "id": "yajilin_c2cbc4f199a422cbffa129e5412ab8a3",
+  "type": "yajilin",
+  "width": 10,
+  "height": 10,
+  "size": "10x10",
+  "pzpr_url": "yajilin/10/10/c23l23f23n40zf12f12d20b20m",
+  "puzzlink_url": "https://puzz.link/p?yajilin/10/10/c23l23f23n40zf12f12d20b20m",
+  "ppbench_play_url": "https://ppbench.com/play/yajilin_c2cbc4f199a422cbffa129e5412ab8a3.html",
+  "local_play_path": "public/ppbench_site/play/yajilin_c2cbc4f199a422cbffa129e5412ab8a3.html",
+  "source_page_order": 168,
+  "solved_count": 0,
+  "model_attempt_count": 58,
+  "failed_count": 58,
+  "solve_rate_percent": 0.0,
+  "difficulty_bin": "0",
+  "golden_300_line": 15,
+  "selection_role": "base_skeleton",
+  "selection_detail": "within_type_rank_05_of_15",
+  "selection_note": "Selected for repr50 to preserve the full split's type coverage and solve-rate distribution."
+}

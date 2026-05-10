@@ -1,0 +1,27 @@
+{
+  "completed": 16,
+  "completed_at": "2026-04-27T20:08:19.994026+00:00",
+  "index": 17,
+  "mode": "evaluate",
+  "outcome": {
+    "failure_reason": null,
+    "legal": true,
+    "llm_capable": true,
+    "model_calls": 1,
+    "model_name": "gpt-5.2",
+    "puzzle_type": "firefly",
+    "replay": {
+      "complete": false,
+      "engine_available": true,
+      "error": null,
+      "legal": true,
+      "move_count": 5
+    },
+    "runtime_s": 600.8132716659748,
+    "solved": false,
+    "status": "solved",
+    "valid_contract": true
+  },
+  "split": "private50",
+  "total": 50
+}
