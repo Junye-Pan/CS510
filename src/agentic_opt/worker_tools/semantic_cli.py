@@ -68,6 +68,21 @@ def command_ctx(args: argparse.Namespace) -> int:
         )
     elif args.ctx_command == "telemetry":
         _emit(client.get("/api/v1/telemetry-runs", {"assignment_id": assignment_id}))
+    elif args.ctx_command == "knowledge":
+        _emit(client.get("/api/v1/knowledge", {"task_id": args.task_id or _env("AO_TASK_ID"), "query": args.query}))
+    elif args.ctx_command == "shared-tools":
+        _emit(
+            client.get(
+                "/api/v1/shared-tools",
+                {
+                    "task_id": args.task_id or _env("AO_TASK_ID"),
+                    "experiment_id": os.environ.get("AO_EXPERIMENT_ID"),
+                    "query": args.query,
+                },
+            )
+        )
+    elif args.ctx_command == "network":
+        _emit(client.get("/api/v1/network-policy", {"assignment_id": assignment_id, "session_id": os.environ.get("AO_SESSION_ID")}))
     else:
         raise ValueError(args.ctx_command)
     return 0
@@ -211,6 +226,11 @@ def command_job(args: argparse.Namespace) -> int:
             payload["cwd"] = str(Path(args.cwd).resolve())
         if args.image:
             payload["image"] = args.image
+        if args.network_mode:
+            payload["network_mode"] = args.network_mode
+        if args.requires_control_plane:
+            payload["requires_control_plane"] = True
+            payload["control_plane_url"] = _env("AO_CONTROL_API_URL")
         if args.template_id:
             payload["template_id"] = args.template_id
         if args.gpu_type_id:
@@ -350,6 +370,111 @@ def command_telemetry(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_tool(args: argparse.Namespace) -> int:
+    client = _client(args)
+    if args.tool_command == "publish":
+        _emit(
+            client.post(
+                "/api/v1/shared-tools",
+                {
+                    "path": str(Path(args.path).resolve()),
+                    "name": args.name,
+                    "description": args.description or "",
+                    "task_id": args.task_id or os.environ.get("AO_TASK_ID"),
+                    "experiment_id": os.environ.get("AO_EXPERIMENT_ID"),
+                    "assignment_id": os.environ.get("AO_ASSIGNMENT_ID"),
+                    "session_id": os.environ.get("AO_SESSION_ID"),
+                    "agent_id": os.environ.get("AO_AGENT_ID"),
+                    "scope": args.scope,
+                    "entrypoint": args.entrypoint,
+                    "version": args.version,
+                    "runtime_requirements": args.runtime_requirement or [],
+                },
+            )
+        )
+    elif args.tool_command == "list":
+        _emit(
+            client.get(
+                "/api/v1/shared-tools",
+                {
+                    "task_id": args.task_id or os.environ.get("AO_TASK_ID"),
+                    "experiment_id": os.environ.get("AO_EXPERIMENT_ID"),
+                    "query": args.query,
+                    "status": args.status,
+                },
+            )
+        )
+    elif args.tool_command == "show":
+        _emit(client.get(f"/api/v1/shared-tools/{args.tool_id}"))
+    elif args.tool_command == "checkout":
+        _emit(
+            client.post(
+                f"/api/v1/shared-tools/{args.tool_id}/checkout",
+                {"destination_path": str(Path(args.destination).resolve()), "force": args.force},
+            )
+        )
+    elif args.tool_command == "install":
+        tool = client.get(f"/api/v1/shared-tools/{args.tool_id}")
+        destination = Path(args.destination).resolve() if args.destination else Path(_env("AO_WORKSPACE_ROOT")) / "shared_tools" / tool["name"]
+        _emit(
+            client.post(
+                f"/api/v1/shared-tools/{args.tool_id}/checkout",
+                {"destination_path": str(destination), "force": args.force},
+            )
+        )
+    else:
+        raise ValueError(args.tool_command)
+    return 0
+
+
+def command_knowledge(args: argparse.Namespace) -> int:
+    client = _client(args)
+    if args.knowledge_command == "list":
+        _emit(client.get("/api/v1/knowledge", {"task_id": args.task_id or _env("AO_TASK_ID"), "query": args.query}))
+    elif args.knowledge_command == "show":
+        client.get("/api/v1/knowledge", {"task_id": args.task_id or _env("AO_TASK_ID")})
+        _emit(client.get(f"/api/v1/knowledge/{args.knowledge_id}"))
+    elif args.knowledge_command == "materialize":
+        client.get("/api/v1/knowledge", {"task_id": args.task_id or _env("AO_TASK_ID")})
+        payload: dict[str, Any] = {"force": args.force, "workspace_root": os.environ.get("AO_WORKSPACE_ROOT")}
+        if args.destination:
+            payload["destination_path"] = str(Path(args.destination).resolve())
+        _emit(client.post(f"/api/v1/knowledge/{args.knowledge_id}/materialize", payload))
+    else:
+        raise ValueError(args.knowledge_command)
+    return 0
+
+
+def command_network(args: argparse.Namespace) -> int:
+    client = _client(args)
+    if args.network_command in {"status", "policy"}:
+        _emit(
+            client.get(
+                "/api/v1/network-policy",
+                {
+                    "experiment_id": os.environ.get("AO_EXPERIMENT_ID"),
+                    "assignment_id": os.environ.get("AO_ASSIGNMENT_ID"),
+                    "session_id": os.environ.get("AO_SESSION_ID"),
+                },
+            )
+        )
+    elif args.network_command == "events":
+        _emit(
+            client.get(
+                "/api/v1/network-access-events",
+                {
+                    "experiment_id": os.environ.get("AO_EXPERIMENT_ID"),
+                    "assignment_id": os.environ.get("AO_ASSIGNMENT_ID"),
+                    "session_id": os.environ.get("AO_SESSION_ID"),
+                    "limit": args.limit,
+                },
+            )
+        )
+    else:
+        raise ValueError(args.network_command)
+    return 0
+
+
 def _wait_for_status(client: ControlPlaneClient, path: str, timeout_s: float) -> dict[str, Any]:
     deadline = time.time() + timeout_s
     terminal = {"completed", "failed", "cancelled", "stopped"}
@@ -410,6 +535,11 @@ def build_parser() -> argparse.ArgumentParser:
         ctx_sub.add_parser(name)
     findings = ctx_sub.add_parser("findings")
     findings.add_argument("query", nargs="?")
+    ctx_knowledge = ctx_sub.add_parser("knowledge")
+    ctx_knowledge.add_argument("query", nargs="?")
+    ctx_tools = ctx_sub.add_parser("shared-tools")
+    ctx_tools.add_argument("query", nargs="?")
+    ctx_sub.add_parser("network")
     leaderboard = ctx_sub.add_parser("leaderboard")
     leaderboard.add_argument("--limit", type=int, default=20)
     incumbent = ctx_sub.add_parser("incumbent")
@@ -483,6 +613,8 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--command", required=True)
     create.add_argument("--cwd")
     create.add_argument("--image")
+    create.add_argument("--network-mode")
+    create.add_argument("--requires-control-plane", action="store_true")
     create.add_argument("--template-id")
     create.add_argument("--gpu-type-id", action="append")
     create.add_argument("--gpu-count", type=int)
@@ -547,6 +679,53 @@ def build_parser() -> argparse.ArgumentParser:
     telemetry_status.add_argument("telemetry_id")
     telemetry_sub.add_parser("list")
     telemetry.set_defaults(func=command_telemetry)
+
+    tool = subparsers.add_parser("tool")
+    tool.add_argument("--task-id")
+    tool_sub = tool.add_subparsers(dest="tool_command", required=True)
+    tool_publish = tool_sub.add_parser("publish")
+    tool_publish.add_argument("--path", required=True)
+    tool_publish.add_argument("--name", required=True)
+    tool_publish.add_argument("--description")
+    tool_publish.add_argument("--scope", default="task")
+    tool_publish.add_argument("--entrypoint")
+    tool_publish.add_argument("--version", default="1")
+    tool_publish.add_argument("--runtime-requirement", action="append")
+    tool_list = tool_sub.add_parser("list")
+    tool_list.add_argument("query", nargs="?")
+    tool_list.add_argument("--status", default="active")
+    tool_show = tool_sub.add_parser("show")
+    tool_show.add_argument("tool_id")
+    tool_checkout = tool_sub.add_parser("checkout")
+    tool_checkout.add_argument("tool_id")
+    tool_checkout.add_argument("--destination", required=True)
+    tool_checkout.add_argument("--force", action="store_true")
+    tool_install = tool_sub.add_parser("install")
+    tool_install.add_argument("tool_id")
+    tool_install.add_argument("--destination")
+    tool_install.add_argument("--force", action="store_true")
+    tool.set_defaults(func=command_tool)
+
+    knowledge = subparsers.add_parser("knowledge")
+    knowledge.add_argument("--task-id")
+    knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True)
+    knowledge_list = knowledge_sub.add_parser("list")
+    knowledge_list.add_argument("query", nargs="?")
+    knowledge_show = knowledge_sub.add_parser("show")
+    knowledge_show.add_argument("knowledge_id")
+    knowledge_materialize = knowledge_sub.add_parser("materialize")
+    knowledge_materialize.add_argument("knowledge_id")
+    knowledge_materialize.add_argument("--destination")
+    knowledge_materialize.add_argument("--force", action="store_true")
+    knowledge.set_defaults(func=command_knowledge)
+
+    network = subparsers.add_parser("network")
+    network_sub = network.add_subparsers(dest="network_command", required=True)
+    network_sub.add_parser("status")
+    network_sub.add_parser("policy")
+    network_events = network_sub.add_parser("events")
+    network_events.add_argument("--limit", type=int, default=200)
+    network.set_defaults(func=command_network)
     return parser
 
 

@@ -8,6 +8,7 @@ import time
 import traceback
 from pathlib import Path
 
+from .process_env import build_subprocess_env
 from .repository import ControlPlaneRepository
 
 
@@ -26,8 +27,7 @@ def run_job(*, db_path: Path, job_id: str) -> int:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
     cwd = Path(inputs.get("cwd") or os.getcwd()).resolve()
-    env = dict(os.environ)
-    env.update({str(key): str(value) for key, value in (inputs.get("env") or {}).items()})
+    env = build_subprocess_env(inputs.get("env") or {})
 
     repository.update_job(job_id, {"status": "running", "pid": os.getpid()})
     started_at = time.time()

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
+import shutil
 from pathlib import Path
 
 from agentic_opt.common.ids import make_run_id
@@ -11,6 +14,17 @@ from .app_server_client import AppServerClient
 from .base import BudgetPolicy, InstructionBundle, WorkspacePolicy
 from .codex_adapter import AppServerAdapterConfig, AppServerCodexAdapter
 from .semantic_workspace import build_semantic_startup_prompt, prepare_semantic_workspace
+
+
+_PATH_COMPONENT_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_SHELL_ENV_SECRET_NAMES = (
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "RUNPOD_API_KEY",
+    "HF_TOKEN",
+    "HUGGINGFACE_HUB_TOKEN",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
     client = ControlPlaneClient(args.api_url)
     context = client.get("/api/v1/context", {"assignment_id": args.assignment_id})
     assignment = context["assignment"]
+    network_policy = client.get(
+        "/api/v1/network-policy",
+        {"assignment_id": args.assignment_id, "session_id": args.session_id},
+    )
     environment = client.post(
         "/api/v1/environments",
         {
@@ -45,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         assignment=assignment,
         session_id=args.session_id,
         runtime_env=runtime_env,
+        network_policy=network_policy,
     )
     client.patch(
         f"/api/v1/sessions/{args.session_id}",
@@ -53,7 +72,8 @@ def main(argv: list[str] | None = None) -> int:
             "workspace_path": str(workspace.root),
             "details": {
                 "entry_path": str(workspace.entry_path),
-                "mode": "dry-run" if args.dry_run else "codex-local",
+                "mode": "dry-run" if args.dry_run else assignment.get("worker_backend") or "codex-local",
+                "network_policy": network_policy,
             },
         },
     )
@@ -70,15 +90,35 @@ def main(argv: list[str] | None = None) -> int:
             "payload": {"workspace_root": str(workspace.root), "entry_path": str(workspace.entry_path)},
         },
     )
+    if ((network_policy.get("enforcement") or {}).get("policy_weakened")):
+        client.post(
+            "/api/v1/network-access-events",
+            {
+                "experiment_id": assignment["experiment_id"],
+                "assignment_id": assignment["assignment_id"],
+                "session_id": args.session_id,
+                "task_id": assignment["task_id"],
+                "agent_id": assignment["agent_id"],
+                "access_type": "policy",
+                "decision": "weakened",
+                "reason": (network_policy.get("enforcement") or {}).get("reason"),
+                "metadata": {"network_policy": network_policy},
+            },
+        )
     if args.dry_run:
         _checkpoint_initial_notebook(client=client, assignment=assignment, session_id=args.session_id, workspace_root=workspace.root)
         client.patch(f"/api/v1/sessions/{args.session_id}", {"status": "completed", "details": {"dry_run": True}})
         return 0
 
+    _remove_legacy_workspace_codex_home(workspace.root)
+    codex_home = private_codex_home_for_workspace(workspace_root=workspace.root, session_id=args.session_id)
     app_client = AppServerClient(
         codex_binary=args.codex_binary,
         root_cwd=str(workspace.root),
-        codex_home=str(workspace.root / ".codex-home"),
+        codex_home=str(codex_home),
+        config_overrides=[
+            f"shell_environment_policy.exclude={json.dumps(list(_SHELL_ENV_SECRET_NAMES))}",
+        ],
         extra_env=workspace.env,
     )
     adapter = AppServerCodexAdapter(
@@ -229,6 +269,26 @@ def _runtime_env_from_environment(environment: dict) -> PreparedRuntimeEnv:
             verify_public_seed=bool(spec.get("verify_public_seed", True)),
         ),
     )
+
+
+def private_codex_home_for_workspace(*, workspace_root: Path, session_id: str) -> Path:
+    workspace_root = workspace_root.resolve()
+    if workspace_root.parent.parent.name == "workspaces":
+        state_root = workspace_root.parent.parent.parent
+    else:
+        state_root = workspace_root.parent
+    return state_root / "provider_state" / "codex_home" / _safe_path_component(session_id)
+
+
+def _safe_path_component(value: str) -> str:
+    safe = _PATH_COMPONENT_RE.sub("_", value).strip("._")
+    return safe or "session"
+
+
+def _remove_legacy_workspace_codex_home(workspace_root: Path) -> None:
+    legacy_home = workspace_root / ".codex-home"
+    if legacy_home.exists():
+        shutil.rmtree(legacy_home)
 
 
 if __name__ == "__main__":

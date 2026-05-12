@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -322,6 +324,203 @@ class ControlPlaneService:
             "entry_relative_path": (artifact.get("metadata") or {}).get("entry_relative_path"),
         }
 
+    def context_for_assignment(self, assignment_id: str) -> dict[str, Any]:
+        context = self.repository.context_for_assignment(assignment_id)
+        assignment = context["assignment"]
+        context["knowledge_items"] = self.list_knowledge_items(task_id=assignment["task_id"])
+        context["network_policy"] = self.network_policy({"assignment_id": assignment_id})
+        return context
+
+    def publish_shared_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source = Path(payload["path"]).resolve()
+        if not source.exists():
+            raise FileNotFoundError(source)
+        name = payload.get("name") or source.stem
+        artifact = self.register_path_artifact(
+            {
+                "experiment_id": payload.get("experiment_id"),
+                "assignment_id": payload.get("assignment_id"),
+                "kind": "shared_tool",
+                "path": str(source),
+                "metadata": {
+                    "tool_name": name,
+                    "tool_description": payload.get("description") or "",
+                    "entrypoint": payload.get("entrypoint"),
+                    "session_id": payload.get("session_id"),
+                    "agent_id": payload.get("agent_id"),
+                },
+            }
+        )
+        record = self.repository.create_shared_tool(
+            {
+                "name": name,
+                "description": payload.get("description") or "",
+                "task_id": payload.get("task_id"),
+                "experiment_id": payload.get("experiment_id"),
+                "assignment_id": payload.get("assignment_id"),
+                "session_id": payload.get("session_id"),
+                "agent_id": payload.get("agent_id"),
+                "scope": payload.get("scope") or "task",
+                "artifact_id": artifact["artifact_id"],
+                "entrypoint": payload.get("entrypoint"),
+                "version": payload.get("version") or "1",
+                "digest": artifact.get("digest"),
+                "runtime_requirements": payload.get("runtime_requirements") or [],
+                "metadata": {
+                    **(payload.get("metadata") or {}),
+                    "artifact": {
+                        "uri": artifact.get("uri"),
+                        "local_path": artifact.get("local_path"),
+                    },
+                },
+            }
+        )
+        return {**record, "artifact": artifact}
+
+    def checkout_shared_tool(self, tool_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        tool = self.repository.get_shared_tool(tool_id)
+        if tool is None:
+            raise KeyError(tool_id)
+        artifact = self.repository.get_artifact(tool["artifact_id"])
+        if artifact is None:
+            raise KeyError(tool["artifact_id"])
+        destination = Path(payload["destination_path"]).resolve()
+        _copy_materialized_path(
+            source=Path(artifact["local_path"]).resolve(),
+            destination=destination,
+            force=bool(payload.get("force")),
+            read_only=False,
+        )
+        return {"tool": tool, "artifact": artifact, "destination_path": str(destination)}
+
+    def list_knowledge_items(self, *, task_id: str, query: str | None = None) -> list[dict[str, Any]]:
+        self.index_task_knowledge(task_id)
+        return self.repository.list_knowledge_items(task_id=task_id, query=query)
+
+    def get_knowledge_item(self, knowledge_id: str) -> dict[str, Any] | None:
+        return self.repository.get_knowledge_item(knowledge_id)
+
+    def materialize_knowledge_item(self, knowledge_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        item = self.repository.get_knowledge_item(knowledge_id)
+        if item is None:
+            raise KeyError(knowledge_id)
+        source = Path(item["source_path"]).resolve()
+        destination_raw = payload.get("destination_path")
+        if destination_raw:
+            destination = Path(destination_raw).resolve()
+        else:
+            workspace_root = payload.get("workspace_root")
+            if not workspace_root:
+                raise ValueError("destination_path or workspace_root is required")
+            destination = Path(workspace_root).resolve() / "knowledge" / knowledge_id / source.name
+        _copy_materialized_path(
+            source=source,
+            destination=destination,
+            force=bool(payload.get("force")),
+            read_only=True,
+        )
+        return {"knowledge_item": item, "destination_path": str(destination)}
+
+    def index_task_knowledge(self, task_id: str) -> list[dict[str, Any]]:
+        task = get_task(task_id)
+        knowledge_root = (task.public_dir / "knowledge").resolve()
+        manifest_path = knowledge_root / "manifest.json"
+        if not manifest_path.exists():
+            return []
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        items = manifest.get("items") or []
+        if not isinstance(items, list):
+            raise ValueError("knowledge manifest must contain an items list")
+        indexed: list[dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise ValueError("knowledge manifest items must be objects")
+            relative = raw.get("path")
+            if not isinstance(relative, str) or not relative:
+                raise ValueError("knowledge item path is required")
+            source = (knowledge_root / relative).resolve()
+            if not source.is_relative_to(knowledge_root):
+                raise PermissionError(f"knowledge item must stay inside {knowledge_root}: {relative}")
+            if not source.exists():
+                raise FileNotFoundError(source)
+            local_id = str(raw.get("knowledge_id") or raw.get("id") or Path(relative).stem)
+            media_type = str(raw.get("media_type") or mimetypes.guess_type(source.name)[0] or "application/octet-stream")
+            record = self.repository.upsert_knowledge_item(
+                {
+                    "knowledge_id": _stable_knowledge_id(task_id, local_id),
+                    "local_id": local_id,
+                    "task_id": task_id,
+                    "title": str(raw.get("title") or local_id),
+                    "kind": str(raw.get("kind") or "reference"),
+                    "source_path": str(source),
+                    "media_type": media_type,
+                    "summary": raw.get("summary"),
+                    "scope": "task",
+                    "digest": _digest_directory(source) if source.is_dir() else _digest_file(source),
+                    "size_bytes": _size_bytes(source),
+                    "tags": raw.get("tags") or [],
+                    "metadata": {
+                        "manifest_path": str(manifest_path),
+                        "manifest_item": raw,
+                    },
+                }
+            )
+            indexed.append(record)
+        return indexed
+
+    def network_policy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        assignment = self.repository.get_assignment(payload["assignment_id"]) if payload.get("assignment_id") else None
+        session = self.repository.get_session(payload["session_id"]) if payload.get("session_id") else None
+        experiment_id = payload.get("experiment_id") or (assignment or session or {}).get("experiment_id")
+        experiment = self.repository.get_experiment(experiment_id) if experiment_id else None
+        if experiment is None and assignment is not None:
+            experiment = self.repository.get_experiment(assignment["experiment_id"])
+        if experiment is None:
+            raise ValueError("experiment_id, assignment_id, or session_id is required")
+        raw_policy = ((experiment.get("policy") or {}).get("network") or (experiment.get("config") or {}).get("network") or {})
+        control_plane = raw_policy.get("control_plane") or raw_policy.get("control_plane_network") or "allow"
+        external = raw_policy.get("external_internet")
+        if external is None:
+            external = "deny" if raw_policy.get("allow_external_internet") is False else "allow"
+        provider = (assignment or session or {}).get("worker_backend") or payload.get("worker_backend") or "unknown"
+        external_enforced = _provider_enforces_external_network(provider)
+        policy_weakened = str(external) == "deny" and not external_enforced
+        docker_enforced = provider in {"docker_image", "docker", "local-docker", "local-docker-strict"}
+        control_plane_relay_required = docker_enforced and str(external) == "deny" and str(control_plane) == "allow"
+        session_relay = ((session or {}).get("details") or {}).get("control_plane_relay") if session else None
+        control_plane_relay_configured = bool(raw_policy.get("control_plane_relay") or session_relay)
+        control_plane_available = not control_plane_relay_required or control_plane_relay_configured
+        return {
+            "experiment_id": experiment["experiment_id"],
+            "assignment_id": (assignment or session or {}).get("assignment_id"),
+            "session_id": (session or {}).get("session_id") or payload.get("session_id"),
+            "task_id": experiment["task_id"],
+            "policy": {
+                "control_plane": control_plane,
+                "external_internet": external,
+                "package_indexes": raw_policy.get("package_indexes") or "policy",
+                "allowed_hosts": raw_policy.get("allowed_hosts") or ["127.0.0.1", "localhost"],
+                "denied_hosts": raw_policy.get("denied_hosts") or [],
+                "audit_external_attempts": bool(raw_policy.get("audit_external_attempts", True)),
+            },
+            "enforcement": {
+                "worker_backend": provider,
+                "control_plane_enforced": True,
+                "external_internet_enforced": external_enforced,
+                "policy_weakened": policy_weakened,
+                "enforcement_mode": "docker_network_none" if docker_enforced and str(external) == "deny" else None,
+                "control_plane_relay_required": control_plane_relay_required,
+                "control_plane_relay_configured": control_plane_relay_configured,
+                "control_plane_available": control_plane_available,
+                "operationally_ready": control_plane_available and not policy_weakened,
+                "reason": (
+                    "worker backend exposes coarse network access for control-plane HTTP"
+                    if policy_weakened
+                    else None
+                ),
+            },
+        }
+
 
 def _direction_plan_for_experiment(experiment: dict[str, Any]) -> list[dict[str, Any]]:
     directions = task_contract(experiment["task_id"])["public_context"].get("research_directions") or []
@@ -339,6 +538,46 @@ def _direction_plan_for_experiment(experiment: dict[str, Any]) -> list[dict[str,
         return list(directions)
     enabled_ids = {str(item) for item in raw_ids}
     return [direction for direction in directions if str(direction.get("direction_id")) in enabled_ids]
+
+
+def _stable_knowledge_id(task_id: str, local_id: str) -> str:
+    return f"knowledge_{_safe_token(task_id)}_{_safe_token(local_id)}"
+
+
+def _safe_token(raw: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
+    return token or "item"
+
+
+def _copy_materialized_path(*, source: Path, destination: Path, force: bool, read_only: bool) -> None:
+    if destination.exists():
+        if not force:
+            raise FileExistsError(destination)
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        shutil.copytree(source, destination)
+    else:
+        shutil.copy2(source, destination)
+    if read_only:
+        _chmod_read_only(destination)
+
+
+def _chmod_read_only(path: Path) -> None:
+    if path.is_dir():
+        for item in path.rglob("*"):
+            if item.is_file():
+                item.chmod(0o444)
+        path.chmod(0o555)
+        return
+    path.chmod(0o444)
+
+
+def _provider_enforces_external_network(provider: str) -> bool:
+    return provider in {"docker_image", "docker", "local-docker", "local-docker-strict"}
 
 
 def _digest_file(path: Path) -> str:

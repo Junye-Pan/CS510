@@ -19,16 +19,28 @@ Implemented:
   explicit durable blobs.
 - Flask API and local worker startup path.
 - Semantic worker CLI tools: `ctx`, `artifact`, `eval`, `finding`, `notebook`,
-  `job`, `env`, and `telemetry`.
+  `job`, `env`, `telemetry`, `tool`, `knowledge`, and `network`.
+- Codex/App Server trace files are captured under worker workspaces for current
+  runs, but they are not yet first-class trace resources.
 - Local job execution, async evaluation, candidate artifact snapshots on
   official submit, and automatic leaderboard/incumbent updates.
 - Environment control through the `local_venv` provider, including worker
   dependency overlays.
+- Docker job network enforcement for `external_internet=deny`: local Docker
+  jobs run with `--network none` and cannot opt back into `bridge`/`host`
+  networking under a deny policy.
+- Unix-socket control-plane relay support. Docker-backed jobs that need
+  semantic API access can mount a relay socket while still running with
+  `--network none`.
 - `tasks/circle_packing_26` as the current concrete benchmark task.
 
 Planned or incomplete:
 
 - `docker_image` environment provider.
+- First-class agent trace bundles with telemetry export adapters such as local
+  JSONL, OTLP/OpenTelemetry, Phoenix-compatible sinks, and
+  Helicone-compatible sinks.
+- Full `docker_image` worker runner integration on top of the relay transport.
 - A first-class attempt/run model distinct from evaluations and jobs.
 - Broader task migration and production UI polish.
 - More complete remote execution provider hardening.
@@ -42,6 +54,7 @@ src/agentic_opt/
                    environment control, jobs, evaluations, leaderboard,
                    telemetry, and provider integrations.
   worker_tools/    Agent-facing semantic CLI tools.
+                   Planned addition: trace.
   adapter/         Codex/App Server integration, workspaces, and worker loop.
   web/             Flask + SQLite backend and routes.
   task_api.py      Task protocol, candidate/runtime specs, evaluation reports.
@@ -77,6 +90,8 @@ Main resource families:
 - Artifacts, including candidate snapshots.
 - Leaderboard entries and incumbents.
 - Findings, notebook checkpoints, telemetry runs, and events.
+- Shared tools, task knowledge items, and network access events.
+- Accepted next resource: agent trace bundles.
 
 Run the local web backend:
 
@@ -88,6 +103,9 @@ Important API groups are under `/api/v1/`, including `tasks`, `experiments`,
 `assignments`, `context`, `environments`, `environment-overlays`, `artifacts`,
 `evaluations`, `leaderboard`, `incumbent`, `jobs`, `findings`,
 `notebook-checkpoints`, `telemetry-runs`, and `events`.
+
+Additional API groups include `shared-tools`, `knowledge`, and
+`network-access-events`. The accepted next API group is `agent-traces`.
 
 ## Worker Tools
 
@@ -106,25 +124,31 @@ ao ctx incumbent
 # Environment management
 ao env status
 ao env ensure
-ao env install scipy==1.12.0
+ao env install --pip scipy==1.12.0 --reason "local diagnostics"
 ao env list-overlays
 
 # Evaluation
-ao eval verify path/to/candidate.py
-ao eval probe path/to/candidate.py
-ao eval submit path/to/candidate.py
+ao eval verify --entry path/to/candidate.py
+ao eval probe --entry path/to/candidate.py
+ao eval submit --entry path/to/candidate.py
 ao eval wait <evaluation-id>
 
-# Artifacts and shared knowledge
-ao artifact upload path/to/file --kind candidate
+# Artifacts and findings
+ao artifact upload --path path/to/file --kind candidate
 ao artifact checkout-incumbent --destination incumbent.py
-ao finding share --title "Observation" --body "..."
+ao finding share --type insight --title "Observation" --body "..."
 ao finding search
 
 # Jobs, notebooks, and telemetry
-ao job create --name experiment --command "python script.py"
-ao notebook checkpoint --title "local search notes" --path notes.md
-ao telemetry start --name local-run
+ao job create --provider local --command "python script.py"
+ao notebook checkpoint --file notes.md
+ao telemetry start --provider local --name local-run
+
+# Trace remains an accepted next command
+# ao trace bundle
+ao tool publish --path local_tools/analyzer --name analyzer
+ao knowledge list
+ao network status
 ```
 
 Official scores should go through `ao eval submit`. A valid official submission
@@ -155,6 +179,51 @@ Planned provider:
 - `docker_image`: a stronger isolation backend where task execution and worker
   execution can share an image contract. This is the long-term path for fully
   reproducible remote execution.
+- Docker-backed execution must enforce `external_internet=deny` below the agent
+  process. The current local Docker job adapter does this with `docker run
+  --network none`; a Docker worker that still needs semantic tool access must
+  use a dedicated control-plane relay instead of broad bridge networking.
+
+## Network Control
+
+Network policy must distinguish local semantic control-plane access from public
+internet access. Workers need the former to use `ctx`, `eval`, `artifact`,
+`finding`, `notebook`, `job`, `env`, and `telemetry`; experiments may deny the
+latter to prevent live web search or answer lookup during optimization.
+
+The target policy shape is:
+
+```text
+control_plane_network = allow
+external_internet = allow | deny | audit
+```
+
+The current Codex/App Server path uses a coarse network switch, so a local
+`codex-local` run that denies external internet but still requires localhost
+control-plane access is marked as policy-weakened. Docker-backed jobs are
+different: under `external_internet=deny`, they run with `--network none` and
+are not allowed to request `bridge` or `host` networking. When a Docker-backed
+job or worker also needs semantic tool access, the system uses a Unix-socket
+control-plane relay: the container mounts only that socket, and the relay
+forwards only control-plane API paths to the Flask server.
+
+## Traces, Shared Tools, And Knowledge
+
+Current Codex worker runs write raw App Server events and summarized output
+under each workspace's `.run/traces/` directory. The next design step is a
+server-owned trace bundle resource with immutable artifacts, digests, and
+optional telemetry export to local JSONL, OpenTelemetry/OTLP, Phoenix-compatible
+sinks, or Helicone-compatible sinks.
+
+Workers can draft reusable helpers in `local_tools/` and publish them to the
+shared tool registry. Published tools are artifact-backed, searchable, and
+checkoutable into `shared_tools/`. Linking published tools to immutable
+AgentTraceBundle records remains future work.
+
+Task packages may include curated read-only knowledge as part of the task
+definition, such as papers, notes, references, and dataset descriptions. The
+knowledge module indexes those files as `KnowledgeItem` records and exposes
+them through worker commands instead of relying on raw filesystem discovery.
 
 ## Task Packages
 
@@ -168,6 +237,8 @@ Typical files:
 - `initial.py`: initial candidate, when the task uses a code-candidate workflow.
 - `public/`: worker-visible task statement, contracts, helper notes, and seed
   assets.
+- `public/knowledge/`: optional curated read-only task context bundle for
+  papers, notes, references, and other task-provided background material.
 - `research_directions/manifest.json`: optional direction set for assignment
   generation.
 

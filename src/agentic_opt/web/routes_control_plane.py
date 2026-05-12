@@ -29,7 +29,9 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
     @app.get("/api/v1/tasks/<task_id>")
     def control_task(task_id: str):
         try:
-            return jsonify(task_contract(task_id))
+            payload = task_contract(task_id)
+            payload["knowledge_items"] = ctx.control_service.list_knowledge_items(task_id=task_id)
+            return jsonify(payload)
         except Exception as exc:
             return _error(exc, 404)
 
@@ -73,6 +75,10 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 "incumbent": ctx.control.get_incumbent(experiment_id=experiment_id),
                 "telemetry_runs": ctx.control.list_telemetry_runs(experiment_id=experiment_id),
                 "artifacts": ctx.control.list_artifacts(experiment_id=experiment_id),
+                "shared_tools": ctx.control.list_shared_tools(task_id=experiment["task_id"], experiment_id=experiment_id),
+                "knowledge_items": ctx.control_service.list_knowledge_items(task_id=experiment["task_id"]),
+                "network_policy": ctx.control_service.network_policy({"experiment_id": experiment_id}),
+                "network_access_events": ctx.control.list_network_access_events(experiment_id=experiment_id, limit=100),
                 "findings": ctx.control.list_findings(experiment_id=experiment_id),
                 "events": ctx.control.list_events(experiment_id=experiment_id, limit=100),
             }
@@ -118,7 +124,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
         assignment = ctx.control.get_assignment(assignment_id)
         if assignment is None:
             return jsonify({"error": "assignment not found"}), 404
-        return jsonify(ctx.control.context_for_assignment(assignment_id))
+        return jsonify(ctx.control_service.context_for_assignment(assignment_id))
 
     @app.patch("/api/v1/assignments/<assignment_id>")
     def control_update_assignment(assignment_id: str):
@@ -169,7 +175,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
         if not assignment_id:
             return jsonify({"error": "assignment_id is required"}), 400
         try:
-            return jsonify(ctx.control.context_for_assignment(assignment_id))
+            return jsonify(ctx.control_service.context_for_assignment(assignment_id))
         except Exception as exc:
             return _error(exc, 404)
 
@@ -260,6 +266,64 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
         if artifact is None:
             return jsonify({"error": "artifact not found"}), 404
         return jsonify(artifact)
+
+    @app.post("/api/v1/shared-tools")
+    def control_publish_shared_tool():
+        try:
+            return jsonify(ctx.control_service.publish_shared_tool(_payload())), 201
+        except Exception as exc:
+            return _error(exc)
+
+    @app.get("/api/v1/shared-tools")
+    def control_list_shared_tools():
+        return jsonify(
+            {
+                "shared_tools": ctx.control.list_shared_tools(
+                    task_id=request.args.get("task_id"),
+                    experiment_id=request.args.get("experiment_id"),
+                    query=request.args.get("query"),
+                    status=request.args.get("status") or "active",
+                )
+            }
+        )
+
+    @app.get("/api/v1/shared-tools/<tool_id>")
+    def control_get_shared_tool(tool_id: str):
+        tool = ctx.control.get_shared_tool(tool_id)
+        if tool is None:
+            return jsonify({"error": "shared tool not found"}), 404
+        return jsonify(tool)
+
+    @app.post("/api/v1/shared-tools/<tool_id>/checkout")
+    def control_checkout_shared_tool(tool_id: str):
+        try:
+            return jsonify(ctx.control_service.checkout_shared_tool(tool_id, _payload()))
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.get("/api/v1/knowledge")
+    def control_list_knowledge():
+        task_id = request.args.get("task_id")
+        if not task_id:
+            return jsonify({"error": "task_id is required"}), 400
+        try:
+            return jsonify({"knowledge_items": ctx.control_service.list_knowledge_items(task_id=task_id, query=request.args.get("query"))})
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.get("/api/v1/knowledge/<knowledge_id>")
+    def control_get_knowledge(knowledge_id: str):
+        item = ctx.control_service.get_knowledge_item(knowledge_id)
+        if item is None:
+            return jsonify({"error": "knowledge item not found"}), 404
+        return jsonify(item)
+
+    @app.post("/api/v1/knowledge/<knowledge_id>/materialize")
+    def control_materialize_knowledge(knowledge_id: str):
+        try:
+            return jsonify(ctx.control_service.materialize_knowledge_item(knowledge_id, _payload()))
+        except Exception as exc:
+            return _error(exc, 404)
 
     @app.post("/api/v1/evaluations")
     def control_create_evaluation():
@@ -483,6 +547,42 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 time.sleep(poll_s)
 
         return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+    @app.get("/api/v1/network-policy")
+    def control_network_policy():
+        try:
+            return jsonify(
+                ctx.control_service.network_policy(
+                    {
+                        "experiment_id": request.args.get("experiment_id"),
+                        "assignment_id": request.args.get("assignment_id"),
+                        "session_id": request.args.get("session_id"),
+                        "worker_backend": request.args.get("worker_backend"),
+                    }
+                )
+            )
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.post("/api/v1/network-access-events")
+    def control_record_network_access_event():
+        try:
+            return jsonify(ctx.control.record_network_access_event(_payload())), 201
+        except Exception as exc:
+            return _error(exc)
+
+    @app.get("/api/v1/network-access-events")
+    def control_list_network_access_events():
+        return jsonify(
+            {
+                "network_access_events": ctx.control.list_network_access_events(
+                    experiment_id=request.args.get("experiment_id"),
+                    assignment_id=request.args.get("assignment_id"),
+                    session_id=request.args.get("session_id"),
+                    limit=int(request.args.get("limit") or 200),
+                )
+            }
+        )
 
     @app.get("/api/v1/sessions/<session_id>/trace")
     def control_session_trace(session_id: str):
