@@ -9,6 +9,13 @@ from typing import Any, Iterator
 from agentic_opt.common.ids import isoformat_z, make_event_id, make_run_id, make_session_id
 
 
+ACTIVE_EXPERIMENT_STATUSES = {"created", "running"}
+TERMINAL_ASSIGNMENT_STATUSES = {"completed", "failed", "stopped", "cancelled", "interrupted", "blocked"}
+TERMINAL_EVALUATION_STATUSES = {"completed", "failed", "cancelled"}
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "blocked"}
+TERMINAL_SESSION_STATUSES = {"completed", "failed", "stopped", "cancelled", "interrupted", "blocked"}
+
+
 def _json(value: Any) -> str:
     return json.dumps(value or {}, sort_keys=True)
 
@@ -286,6 +293,68 @@ class ControlPlaneRepository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_cp_telemetry_experiment
                 ON cp_telemetry_runs(experiment_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS cp_shared_tools (
+                    tool_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    task_id TEXT,
+                    experiment_id TEXT,
+                    assignment_id TEXT,
+                    session_id TEXT,
+                    agent_id TEXT,
+                    scope TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    entrypoint TEXT,
+                    version TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    digest TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    runtime_requirements_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_cp_shared_tools_task
+                ON cp_shared_tools(task_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_cp_shared_tools_experiment
+                ON cp_shared_tools(experiment_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS cp_knowledge_items (
+                    knowledge_id TEXT PRIMARY KEY,
+                    local_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    summary TEXT,
+                    scope TEXT NOT NULL,
+                    digest TEXT,
+                    size_bytes INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_cp_knowledge_task
+                ON cp_knowledge_items(task_id, title);
+
+                CREATE TABLE IF NOT EXISTS cp_network_access_events (
+                    network_event_id TEXT PRIMARY KEY,
+                    experiment_id TEXT,
+                    assignment_id TEXT,
+                    session_id TEXT,
+                    task_id TEXT,
+                    agent_id TEXT,
+                    destination TEXT,
+                    access_type TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    reason TEXT,
+                    timestamp TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_cp_network_events_experiment
+                ON cp_network_access_events(experiment_id, timestamp DESC);
                 """
             )
 
@@ -340,6 +409,8 @@ class ControlPlaneRepository:
         current = self.get_experiment(experiment_id)
         if current is None:
             raise KeyError(experiment_id)
+        if current["status"] == status and not metadata:
+            return current
         merged_metadata = {**(current.get("metadata") or {}), **(metadata or {})}
         with self._connect() as conn:
             conn.execute(
@@ -362,6 +433,48 @@ class ControlPlaneRepository:
             }
         )
         return record
+
+    def refresh_experiment_status(self, experiment_id: str) -> dict[str, Any]:
+        experiment = self.get_experiment(experiment_id)
+        if experiment is None:
+            raise KeyError(experiment_id)
+        if experiment["status"] not in ACTIVE_EXPERIMENT_STATUSES:
+            return experiment
+        next_status = self._derive_experiment_status(experiment_id)
+        if next_status is None or next_status == experiment["status"]:
+            return experiment
+        return self.update_experiment_status(
+            experiment_id,
+            next_status,
+            metadata={
+                "status_rollup": {
+                    "source": "control_plane_resource_rollup",
+                    "status": next_status,
+                }
+            },
+        )
+
+    def _derive_experiment_status(self, experiment_id: str) -> str | None:
+        assignments = self.list_assignments(experiment_id=experiment_id)
+        if not assignments:
+            return None
+        assignment_statuses = {str(item["status"]) for item in assignments}
+        if any(status not in TERMINAL_ASSIGNMENT_STATUSES for status in assignment_statuses):
+            return "running"
+
+        jobs = self.list_jobs(experiment_id=experiment_id)
+        if any(str(item["status"]) not in TERMINAL_JOB_STATUSES for item in jobs):
+            return "running"
+
+        evaluations = self.list_evaluations(experiment_id=experiment_id)
+        if any(str(item["status"]) not in TERMINAL_EVALUATION_STATUSES for item in evaluations):
+            return "running"
+
+        if assignment_statuses == {"completed"}:
+            return "completed"
+        if assignment_statuses == {"cancelled"}:
+            return "cancelled"
+        return "failed"
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -512,6 +625,7 @@ class ControlPlaneRepository:
             )
         record = self.get_assignment(assignment_id)
         assert record is not None
+        self.refresh_experiment_status(record["experiment_id"])
         return record
 
     def get_assignment(self, assignment_id: str) -> dict[str, Any] | None:
@@ -586,7 +700,7 @@ class ControlPlaneRepository:
         status = payload.get("status") or current["status"]
         now = isoformat_z()
         ended_at = payload.get("ended_at")
-        if ended_at is None and status in {"completed", "failed", "stopped", "cancelled"}:
+        if ended_at is None and status in TERMINAL_SESSION_STATUSES:
             ended_at = now
         with self._connect() as conn:
             conn.execute(
@@ -609,8 +723,10 @@ class ControlPlaneRepository:
             )
         record = self.get_session(session_id)
         assert record is not None
-        if status in {"completed", "failed", "stopped", "cancelled"}:
+        if status in TERMINAL_SESSION_STATUSES:
             self.update_assignment_status(record["assignment_id"], status)
+        else:
+            self.refresh_experiment_status(record["experiment_id"])
         return record
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
@@ -921,6 +1037,175 @@ class ControlPlaneRepository:
             row = conn.execute("SELECT * FROM cp_artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
         return None if row is None else self._row_artifact(row)
 
+    def create_shared_tool(self, payload: dict[str, Any]) -> dict[str, Any]:
+        now = isoformat_z()
+        record = {
+            "tool_id": payload.get("tool_id") or make_run_id("tool"),
+            "name": payload["name"],
+            "description": payload.get("description") or "",
+            "task_id": payload.get("task_id"),
+            "experiment_id": payload.get("experiment_id"),
+            "assignment_id": payload.get("assignment_id"),
+            "session_id": payload.get("session_id"),
+            "agent_id": payload.get("agent_id"),
+            "scope": payload.get("scope") or "task",
+            "artifact_id": payload["artifact_id"],
+            "entrypoint": payload.get("entrypoint"),
+            "version": payload.get("version") or "1",
+            "status": payload.get("status") or "active",
+            "digest": payload.get("digest"),
+            "created_at": payload.get("created_at") or now,
+            "updated_at": payload.get("updated_at") or now,
+            "runtime_requirements": payload.get("runtime_requirements") or [],
+            "metadata": payload.get("metadata") or {},
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cp_shared_tools (
+                    tool_id, name, description, task_id, experiment_id,
+                    assignment_id, session_id, agent_id, scope, artifact_id,
+                    entrypoint, version, status, digest, created_at, updated_at,
+                    runtime_requirements_json, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["tool_id"],
+                    record["name"],
+                    record["description"],
+                    record["task_id"],
+                    record["experiment_id"],
+                    record["assignment_id"],
+                    record["session_id"],
+                    record["agent_id"],
+                    record["scope"],
+                    record["artifact_id"],
+                    record["entrypoint"],
+                    record["version"],
+                    record["status"],
+                    record["digest"],
+                    record["created_at"],
+                    record["updated_at"],
+                    json.dumps(record["runtime_requirements"], sort_keys=True),
+                    _json(record["metadata"]),
+                ),
+            )
+        self.record_event(
+            {
+                "experiment_id": record["experiment_id"],
+                "assignment_id": record["assignment_id"],
+                "session_id": record["session_id"],
+                "task_id": record["task_id"],
+                "agent_id": record["agent_id"],
+                "event_type": "shared_tool.published",
+                "summary": f"shared tool published: {record['name']}",
+                "payload": {"tool_id": record["tool_id"], "artifact_id": record["artifact_id"]},
+            }
+        )
+        return record
+
+    def list_shared_tools(
+        self,
+        *,
+        task_id: str | None = None,
+        experiment_id: str | None = None,
+        query: str | None = None,
+        status: str | None = "active",
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM cp_shared_tools"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if task_id:
+            clauses.append("(task_id = ? OR scope = 'global')")
+            params.append(task_id)
+        if experiment_id:
+            clauses.append("(experiment_id = ? OR experiment_id IS NULL)")
+            params.append(experiment_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if query:
+            clauses.append("(LOWER(name) LIKE ? OR LOWER(description) LIKE ?)")
+            like = f"%{query.lower()}%"
+            params.extend([like, like])
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, tool_id DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [self._row_shared_tool(row) for row in rows]
+
+    def get_shared_tool(self, tool_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM cp_shared_tools WHERE tool_id = ?", (tool_id,)).fetchone()
+        return None if row is None else self._row_shared_tool(row)
+
+    def upsert_knowledge_item(self, payload: dict[str, Any]) -> dict[str, Any]:
+        now = isoformat_z()
+        existing = self.get_knowledge_item(payload["knowledge_id"])
+        record = {
+            "knowledge_id": payload["knowledge_id"],
+            "local_id": payload.get("local_id") or payload["knowledge_id"],
+            "task_id": payload["task_id"],
+            "title": payload["title"],
+            "kind": payload.get("kind") or "reference",
+            "source_path": payload["source_path"],
+            "media_type": payload.get("media_type") or "application/octet-stream",
+            "summary": payload.get("summary"),
+            "scope": payload.get("scope") or "task",
+            "digest": payload.get("digest"),
+            "size_bytes": payload.get("size_bytes"),
+            "created_at": (existing or {}).get("created_at") or payload.get("created_at") or now,
+            "updated_at": payload.get("updated_at") or now,
+            "tags": payload.get("tags") or [],
+            "metadata": payload.get("metadata") or {},
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO cp_knowledge_items (
+                    knowledge_id, local_id, task_id, title, kind, source_path,
+                    media_type, summary, scope, digest, size_bytes, created_at,
+                    updated_at, tags_json, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["knowledge_id"],
+                    record["local_id"],
+                    record["task_id"],
+                    record["title"],
+                    record["kind"],
+                    record["source_path"],
+                    record["media_type"],
+                    record["summary"],
+                    record["scope"],
+                    record["digest"],
+                    record["size_bytes"],
+                    record["created_at"],
+                    record["updated_at"],
+                    json.dumps(record["tags"], sort_keys=True),
+                    _json(record["metadata"]),
+                ),
+            )
+        return record
+
+    def list_knowledge_items(self, *, task_id: str, query: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM cp_knowledge_items WHERE task_id = ?"
+        params: list[Any] = [task_id]
+        if query:
+            sql += " AND (LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(kind) LIKE ?)"
+            like = f"%{query.lower()}%"
+            params.extend([like, like, like])
+        sql += " ORDER BY title ASC, knowledge_id ASC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [self._row_knowledge_item(row) for row in rows]
+
+    def get_knowledge_item(self, knowledge_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM cp_knowledge_items WHERE knowledge_id = ?", (knowledge_id,)).fetchone()
+        return None if row is None else self._row_knowledge_item(row)
+
     def create_evaluation(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = isoformat_z()
         record = {
@@ -1031,6 +1316,7 @@ class ControlPlaneRepository:
             )
         record = self.get_evaluation(evaluation_id)
         assert record is not None
+        self.refresh_experiment_status(record["experiment_id"])
         return record
 
     def create_leaderboard_entry(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1249,6 +1535,7 @@ class ControlPlaneRepository:
             )
         record = self.get_job(job_id)
         assert record is not None
+        self.refresh_experiment_status(record["experiment_id"])
         return record
 
     def share_finding(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1550,6 +1837,76 @@ class ControlPlaneRepository:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [self._row_event(row) for row in rows]
 
+    def record_network_access_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+        now = isoformat_z()
+        record = {
+            "network_event_id": payload.get("network_event_id") or make_run_id("net"),
+            "experiment_id": payload.get("experiment_id"),
+            "assignment_id": payload.get("assignment_id"),
+            "session_id": payload.get("session_id"),
+            "task_id": payload.get("task_id"),
+            "agent_id": payload.get("agent_id"),
+            "destination": payload.get("destination"),
+            "access_type": payload.get("access_type") or "unknown",
+            "decision": payload.get("decision") or "audit",
+            "reason": payload.get("reason"),
+            "timestamp": payload.get("timestamp") or now,
+            "metadata": payload.get("metadata") or {},
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cp_network_access_events (
+                    network_event_id, experiment_id, assignment_id, session_id,
+                    task_id, agent_id, destination, access_type, decision,
+                    reason, timestamp, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["network_event_id"],
+                    record["experiment_id"],
+                    record["assignment_id"],
+                    record["session_id"],
+                    record["task_id"],
+                    record["agent_id"],
+                    record["destination"],
+                    record["access_type"],
+                    record["decision"],
+                    record["reason"],
+                    record["timestamp"],
+                    _json(record["metadata"]),
+                ),
+            )
+        return record
+
+    def list_network_access_events(
+        self,
+        *,
+        experiment_id: str | None = None,
+        assignment_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM cp_network_access_events"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if experiment_id:
+            clauses.append("experiment_id = ?")
+            params.append(experiment_id)
+        if assignment_id:
+            clauses.append("assignment_id = ?")
+            params.append(assignment_id)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._row_network_access_event(row) for row in rows]
+
     def context_for_assignment(self, assignment_id: str) -> dict[str, Any]:
         assignment = self.get_assignment(assignment_id)
         if assignment is None:
@@ -1575,6 +1932,12 @@ class ControlPlaneRepository:
             "environment_overlays": self.list_environment_overlays(assignment_id=assignment_id),
             "telemetry_runs": self.list_telemetry_runs(assignment_id=assignment_id),
             "notebook_checkpoints": self.list_notebook_checkpoints(assignment_id=assignment_id),
+            "shared_tools": self.list_shared_tools(
+                task_id=assignment["task_id"],
+                experiment_id=assignment["experiment_id"],
+            ),
+            "knowledge_items": self.list_knowledge_items(task_id=assignment["task_id"]),
+            "network_access_events": self.list_network_access_events(assignment_id=assignment_id, limit=20),
         }
 
     def _row_experiment(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -1695,6 +2058,47 @@ class ControlPlaneRepository:
             "metadata": _loads(row["metadata_json"], {}),
         }
 
+    def _row_shared_tool(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "tool_id": row["tool_id"],
+            "name": row["name"],
+            "description": row["description"],
+            "task_id": row["task_id"],
+            "experiment_id": row["experiment_id"],
+            "assignment_id": row["assignment_id"],
+            "session_id": row["session_id"],
+            "agent_id": row["agent_id"],
+            "scope": row["scope"],
+            "artifact_id": row["artifact_id"],
+            "entrypoint": row["entrypoint"],
+            "version": row["version"],
+            "status": row["status"],
+            "digest": row["digest"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "runtime_requirements": _loads(row["runtime_requirements_json"], []),
+            "metadata": _loads(row["metadata_json"], {}),
+        }
+
+    def _row_knowledge_item(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "knowledge_id": row["knowledge_id"],
+            "local_id": row["local_id"],
+            "task_id": row["task_id"],
+            "title": row["title"],
+            "kind": row["kind"],
+            "source_path": row["source_path"],
+            "media_type": row["media_type"],
+            "summary": row["summary"],
+            "scope": row["scope"],
+            "digest": row["digest"],
+            "size_bytes": row["size_bytes"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "tags": _loads(row["tags_json"], []),
+            "metadata": _loads(row["metadata_json"], {}),
+        }
+
     def _row_evaluation(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "evaluation_id": row["evaluation_id"],
@@ -1795,4 +2199,20 @@ class ControlPlaneRepository:
             "tags": _loads(row["tags_json"], {}),
             "artifacts": _loads(row["artifacts_json"], {}),
             "details": _loads(row["details_json"], {}),
+        }
+
+    def _row_network_access_event(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "network_event_id": row["network_event_id"],
+            "experiment_id": row["experiment_id"],
+            "assignment_id": row["assignment_id"],
+            "session_id": row["session_id"],
+            "task_id": row["task_id"],
+            "agent_id": row["agent_id"],
+            "destination": row["destination"],
+            "access_type": row["access_type"],
+            "decision": row["decision"],
+            "reason": row["reason"],
+            "timestamp": row["timestamp"],
+            "metadata": _loads(row["metadata_json"], {}),
         }

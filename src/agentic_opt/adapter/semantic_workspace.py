@@ -24,6 +24,7 @@ class SemanticWorkspace:
     env: dict[str, str]
     readable_roots: list[str]
     writable_roots: list[str]
+    network_policy: dict[str, object]
 
 
 def prepare_semantic_workspace(
@@ -33,6 +34,7 @@ def prepare_semantic_workspace(
     assignment: dict,
     session_id: str,
     runtime_env: PreparedRuntimeEnv | None = None,
+    network_policy: dict[str, object] | None = None,
 ) -> SemanticWorkspace:
     workspace_root = workspace_root.resolve()
     workspace_root.mkdir(parents=True, exist_ok=True)
@@ -44,7 +46,8 @@ def prepare_semantic_workspace(
     if not entry_path.exists():
         _materialize_candidate_seed(public_dir=task.public_dir, workspace_root=workspace_root, spec=candidate_spec)
 
-    for relative in ("reference", "artifacts", "findings", "local_tools"):
+    network_policy = network_policy or {}
+    for relative in ("reference", "artifacts", "findings", "local_tools", "shared_tools", "knowledge"):
         (workspace_root / relative).mkdir(parents=True, exist_ok=True)
     worklog = workspace_root / "WORKLOG.md"
     if not worklog.exists():
@@ -67,8 +70,10 @@ def prepare_semantic_workspace(
         assignment=assignment,
         session_id=session_id,
         workspace_root=workspace_root,
+        network_policy=network_policy,
     )
     environment_exports = _environment_exports(runtime_env)
+    network_exports = _network_exports(network_policy)
     repo_src = str(get_repo_root() / "src")
     venv_bin = str(runtime_env.venv_dir / "bin")
     env = {
@@ -80,6 +85,7 @@ def prepare_semantic_workspace(
         "AO_SESSION_ID": session_id,
         "AO_WORKSPACE_ROOT": str(workspace_root),
         **environment_exports,
+        **network_exports,
         **runtime_env.exports(),
         "PATH": _prepend_paths([str(bin_dir), venv_bin], os.environ.get("PATH")),
         "PYTHONPATH": _prepend_path(repo_src, os.environ.get("PYTHONPATH")),
@@ -94,6 +100,7 @@ def prepare_semantic_workspace(
         env=env,
         readable_roots=[str(workspace_root), str(runtime_env.root)],
         writable_roots=[str(workspace_root)],
+        network_policy=network_policy,
     )
 
 
@@ -107,6 +114,8 @@ def build_semantic_startup_prompt(*, assignment: dict, workspace: SemanticWorksp
             f"Direction id: {direction.get('direction_id')}\n"
             f"Direction note: {direction.get('startup_note') or ''}\n"
         )
+    network_policy = workspace.network_policy.get("policy") if isinstance(workspace.network_policy, dict) else {}
+    network_enforcement = workspace.network_policy.get("enforcement") if isinstance(workspace.network_policy, dict) else {}
     return f"""You are a Coding Agent worker in an autonomous optimization experiment.
 
 Task: {assignment['task_id']}
@@ -130,6 +139,15 @@ Use semantic server tools:
 - ctx incumbent
 - env status
 - env install --pip <requirement> --reason <why>
+- network status
+- knowledge list
+- knowledge show <knowledge-id>
+- knowledge materialize <knowledge-id>
+- tool publish --path local_tools/<name> --name <name> --description <text>
+- tool list
+- tool show <tool-id>
+- tool checkout <tool-id> --destination shared_tools/<name>
+- tool install <tool-id>
 - artifact upload --path <path> --kind <kind>
 - artifact checkout-incumbent --destination <path>
 - eval verify --entry <candidate-entrypoint>
@@ -140,7 +158,7 @@ Use semantic server tools:
 - finding share --type <type> --title <title> --body <text>
 - notebook checkpoint --file WORKLOG.md
 - job create --provider local --command '<command>'
-- job create --provider local-docker --image <image> --command '<command>'
+- job create --provider local-docker --image <image> --command '<command>' [--network-mode <mode>]
 - job create --provider runpod --template-id <template> --command '<command>'
 - job status <job-id> / job logs <job-id> / job wait <job-id>
 - telemetry start --provider local --name <run-name>
@@ -152,6 +170,8 @@ evaluate, checkpoint, share findings, or launch jobs when evidence makes that
 action useful. Official scores must come from eval submit/server evaluation.
 
 This assignment budget is: {budget}
+Network policy: {network_policy}
+Network enforcement: {network_enforcement}
 """
 
 
@@ -163,7 +183,10 @@ Do not assume a fixed numbered workflow.
 Use `ctx task` for task objective and public contract.
 Use `ctx context` for assignment state, research direction, incumbent, leaderboard, prior findings, artifacts, jobs, evaluations, and notebook checkpoints.
 Use `eval verify`, `eval probe`, and `eval submit` for server-owned feedback and official scoring.
-Use `env`, `artifact`, `finding`, `notebook`, `job`, and `telemetry` for durable server-visible state.
+Use `env`, `artifact`, `finding`, `notebook`, `job`, `telemetry`, `tool`, `knowledge`, and `network` for durable server-visible state.
+Use `knowledge` for read-only task-provided papers, notes, references, and context.
+Use `local_tools/` for draft helper tools and `tool publish` when a helper should become reusable by later workers.
+Check `network status` before any action that might need external internet. Control-plane access does not imply permission to search the public internet.
 Do not access hidden evaluator internals.
 """
 
@@ -226,7 +249,9 @@ or `job create --provider local-docker --image <image> --command '<command>'`
 for Docker-backed local jobs. Use `job create --provider runpod` only when the
 assignment policy and budget allow cloud execution. Use `job status`, `job logs`,
 and `job wait` to inspect durable compute that can outlive the current
-coding-agent turn. Future providers should use the same job resource contract.
+coding-agent turn. When external internet is denied, Docker-backed local jobs
+use Docker network isolation and cannot opt into broad networking. Future
+providers should use the same job resource contract.
 """,
     "environment-use": """
 # Environment Use
@@ -243,6 +268,29 @@ environment used for official scoring.
 Use `telemetry start`, `telemetry log-metrics`, and `telemetry finish` for
 non-official process or training metrics. Telemetry helps diagnose jobs and
 compare runs, but official scores must still come from `eval submit`.
+""",
+    "tool-use": """
+# Shared Tool Use
+
+Use `local_tools/` for helper scripts that are only useful inside this session.
+Use `tool publish` when a tested helper should become reusable by later workers.
+Use `tool list`, `tool show`, `tool checkout`, and `tool install` to reuse
+server-owned shared tools instead of copying from another worker workspace.
+""",
+    "knowledge-use": """
+# Knowledge Use
+
+Use `knowledge list`, `knowledge show`, and `knowledge materialize` to inspect
+read-only task-provided papers, notes, references, and background material.
+Knowledge is part of the task definition; it is not worker memory and not a
+permission to search the live web.
+""",
+    "network-use": """
+# Network Use
+
+Use `network status` to inspect whether external internet is allowed, denied,
+or only audit-logged. Semantic control-plane access is separate from public
+internet access.
 """,
 }
 
@@ -275,6 +323,7 @@ def _write_semantic_tool_wrappers(
     assignment: dict,
     session_id: str,
     workspace_root: Path,
+    network_policy: dict[str, object],
 ) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     exports = {
@@ -286,11 +335,12 @@ def _write_semantic_tool_wrappers(
         "AO_SESSION_ID": session_id,
         "AO_WORKSPACE_ROOT": str(workspace_root),
         **_environment_exports(runtime_env),
+        **_network_exports(network_policy),
         **runtime_env.exports(),
         "PYTHONPATH": _prepend_path(str(get_repo_root() / "src"), os.environ.get("PYTHONPATH")),
         "VIRTUAL_ENV": str(runtime_env.venv_dir),
     }
-    for command_name in ("ctx", "artifact", "eval", "finding", "notebook", "job", "env", "telemetry"):
+    for command_name in ("ctx", "artifact", "eval", "finding", "notebook", "job", "env", "telemetry", "tool", "knowledge", "network"):
         lines = ["#!/bin/sh", "set -eu"]
         for key, value in exports.items():
             lines.append(f"export {key}={shlex.quote(str(value))}")
@@ -324,4 +374,18 @@ def _environment_exports(runtime_env: PreparedRuntimeEnv) -> dict[str, str]:
         "AO_ENVIRONMENT_ROOT": str(runtime_env.root),
         "AO_ENVIRONMENT_PYTHON": str(runtime_env.python_path),
         "AO_ENVIRONMENT_FINGERPRINT": runtime_env.fingerprint,
+    }
+
+
+def _network_exports(network_policy: dict[str, object]) -> dict[str, str]:
+    policy = network_policy.get("policy") if isinstance(network_policy, dict) else {}
+    enforcement = network_policy.get("enforcement") if isinstance(network_policy, dict) else {}
+    if not isinstance(policy, dict):
+        policy = {}
+    if not isinstance(enforcement, dict):
+        enforcement = {}
+    return {
+        "AO_NETWORK_CONTROL_PLANE": str(policy.get("control_plane") or "allow"),
+        "AO_NETWORK_EXTERNAL_INTERNET": str(policy.get("external_internet") or "allow"),
+        "AO_NETWORK_POLICY_WEAKENED": "1" if enforcement.get("policy_weakened") else "0",
     }

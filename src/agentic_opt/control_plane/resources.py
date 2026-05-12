@@ -238,6 +238,67 @@ class NotebookCheckpointResource:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class SharedToolResource:
+    tool_id: str
+    name: str
+    description: str
+    scope: str
+    artifact_id: str
+    task_id: str | None = None
+    experiment_id: str | None = None
+    assignment_id: str | None = None
+    session_id: str | None = None
+    agent_id: str | None = None
+    entrypoint: str | None = None
+    version: str = "1"
+    status: str = "active"
+    digest: str | None = None
+    runtime_requirements: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class KnowledgeItemResource:
+    knowledge_id: str
+    local_id: str
+    task_id: str
+    title: str
+    kind: str
+    source_path: str
+    media_type: str
+    summary: str | None = None
+    scope: str = "task"
+    digest: str | None = None
+    size_bytes: int | None = None
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class NetworkAccessEventResource:
+    network_event_id: str
+    access_type: str
+    decision: str
+    experiment_id: str | None = None
+    assignment_id: str | None = None
+    session_id: str | None = None
+    task_id: str | None = None
+    agent_id: str | None = None
+    destination: str | None = None
+    reason: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 CURRENT_RESOURCE_MAPPING: dict[str, str] = {
     "Task": "task package loaded through configured task roots; server API exposes the semantic task contract",
     "Experiment": "control-plane experiments table",
@@ -253,6 +314,9 @@ CURRENT_RESOURCE_MAPPING: dict[str, str] = {
     "Artifact": "new artifact registry row plus local/object-store blob URI",
     "Finding": "server-visible research claim; historical patterns are findings, usually with finding_type='pattern'",
     "NotebookCheckpoint": "server-owned checkpoint for worker notebook or worklog state",
+    "SharedTool": "agent-authored reusable helper code published from local_tools and backed by an Artifact",
+    "KnowledgeItem": "read-only task-packaged context such as papers, notes, references, and benchmark background",
+    "NetworkAccessEvent": "network policy audit event for external internet attempts or weakened enforcement",
 }
 
 
@@ -272,6 +336,9 @@ def object_model_schema() -> dict[str, Any]:
             "Artifact": list(ArtifactResource.__dataclass_fields__),
             "Finding": list(FindingResource.__dataclass_fields__),
             "NotebookCheckpoint": list(NotebookCheckpointResource.__dataclass_fields__),
+            "SharedTool": list(SharedToolResource.__dataclass_fields__),
+            "KnowledgeItem": list(KnowledgeItemResource.__dataclass_fields__),
+            "NetworkAccessEvent": list(NetworkAccessEventResource.__dataclass_fields__),
         },
         "current_resource_mapping": CURRENT_RESOURCE_MAPPING,
     }

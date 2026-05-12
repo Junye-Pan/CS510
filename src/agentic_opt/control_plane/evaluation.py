@@ -20,6 +20,7 @@ from agentic_opt.task_registry import get_task
 
 from .environments import EnvironmentService
 from .jobs import JobService
+from .process_env import build_subprocess_env, sanitize_env
 from .repository import ControlPlaneRepository
 
 
@@ -444,14 +445,12 @@ def _entry_path_for_artifact(artifact: dict[str, Any]) -> str:
 
 def _execution_subprocess_env(execution: dict[str, Any]) -> dict[str, str]:
     repo_root = get_repo_root()
-    env = dict(os.environ)
-    env.pop("PYTHONHOME", None)
-    env.update({str(key): str(value) for key, value in (execution.get("exports") or {}).items()})
+    env = build_subprocess_env(execution.get("exports") or {})
     env["PYTHONPATH"] = str(repo_root / "src")
     if "AO_TASKS_ROOTS" in os.environ:
-        env["AO_TASKS_ROOTS"] = os.environ["AO_TASKS_ROOTS"]
+        env.update(sanitize_env({"AO_TASKS_ROOTS": os.environ["AO_TASKS_ROOTS"]}))
     elif "AO_TASKS_ROOT" in os.environ:
-        env["AO_TASKS_ROOT"] = os.environ["AO_TASKS_ROOT"]
+        env.update(sanitize_env({"AO_TASKS_ROOT": os.environ["AO_TASKS_ROOT"]}))
     return env
 
 

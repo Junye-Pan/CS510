@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agentic_opt.adapter.app_server_client import AppServerClient, AppServerClientError
+from agentic_opt.adapter.semantic_worker import private_codex_home_for_workspace
 from agentic_opt.adapter.semantic_workspace import (
     SEMANTIC_SKILL_BODIES,
     build_semantic_startup_prompt,
@@ -57,7 +59,8 @@ class SemanticWorkspaceTests(unittest.TestCase):
             runtime_env=runtime_env,
         )
 
-        for command in ("ctx", "artifact", "eval", "finding", "notebook", "job", "env", "telemetry"):
+        commands = ("ctx", "artifact", "eval", "finding", "notebook", "job", "env", "telemetry", "tool", "knowledge", "network")
+        for command in commands:
             self.assertTrue((workspace.bin_dir / command).exists())
         self.assertFalse((workspace.bin_dir / "fs").exists())
         self.assertFalse((workspace.bin_dir / "ve").exists())
@@ -74,7 +77,36 @@ class SemanticWorkspaceTests(unittest.TestCase):
         self.assertIn("env status", prompt)
         self.assertIn("job create --provider local", prompt)
         self.assertIn("telemetry start", prompt)
+        self.assertIn("knowledge list", prompt)
+        self.assertIn("tool publish", prompt)
+        self.assertIn("network status", prompt)
         self.assertNotIn("fs context", prompt)
+
+    def test_private_codex_home_is_outside_agent_workspace(self) -> None:
+        workspace_root = self.root / "run" / "workspaces" / "assign_test" / "session_test"
+
+        codex_home = private_codex_home_for_workspace(
+            workspace_root=workspace_root,
+            session_id="../session/test",
+        )
+
+        self.assertEqual(
+            codex_home,
+            self.root.resolve() / "run" / "provider_state" / "codex_home" / "session_test",
+        )
+        self.assertFalse(codex_home.is_relative_to(workspace_root))
+        self.assertFalse((workspace_root / ".codex-home").exists())
+
+    def test_app_server_rejects_codex_home_inside_workspace(self) -> None:
+        workspace_root = self.root / "workspace"
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        client = AppServerClient(
+            root_cwd=str(workspace_root),
+            codex_home=str(workspace_root / ".codex-home"),
+        )
+
+        with self.assertRaises(AppServerClientError):
+            client._build_env()
 
     def _write_toy_task(self) -> None:
         task_dir = self.tasks_root / "toy_semantic"

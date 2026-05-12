@@ -37,12 +37,14 @@ class AppServerClient:
         codex_binary: str = "codex",
         root_cwd: str | None = None,
         codex_home: str | None = None,
+        config_overrides: list[str] | None = None,
         extra_env: dict[str, str] | None = None,
         startup_timeout_s: float = 20.0,
     ) -> None:
         self.codex_binary = codex_binary
         self.root_cwd = root_cwd
         self.codex_home = codex_home
+        self.config_overrides = list(config_overrides or ())
         self.extra_env = extra_env or {}
         self.startup_timeout_s = startup_timeout_s
 
@@ -61,8 +63,11 @@ class AppServerClient:
             return
         if shutil.which(self.codex_binary) is None:
             raise AppServerClientError(f"Unable to find Codex binary: {self.codex_binary}")
+        command = [self.codex_binary, "app-server", "--listen", "stdio://"]
+        for override in self.config_overrides:
+            command.extend(["-c", override])
         self._process = subprocess.Popen(
-            [self.codex_binary, "app-server", "--listen", "stdio://"],
+            command,
             cwd=self.root_cwd,
             env=self._build_env(),
             stdin=subprocess.PIPE,
@@ -204,7 +209,13 @@ class AppServerClient:
         env.update(self.extra_env)
         if self.codex_home:
             target_home = Path(self.codex_home).resolve()
+            if self.root_cwd is not None and _is_relative_to(target_home, Path(self.root_cwd).resolve()):
+                raise AppServerClientError("codex_home must be outside the agent workspace/root cwd")
             target_home.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(target_home, 0o700)
+            except OSError:
+                pass
             self._prepare_codex_home(target_home, env)
             env["CODEX_HOME"] = str(target_home)
         return env
@@ -242,6 +253,11 @@ class AppServerClient:
             except OSError:
                 pass
         shutil.copy2(source, target)
+        if target.name == "auth.json":
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                pass
 
     def _merge_config_file(self, source: Path, target: Path) -> None:
         if not source.exists() or not source.is_file():
@@ -369,3 +385,11 @@ class AppServerClient:
         with self._condition:
             self._notifications.append(payload)
             self._condition.notify_all()
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True

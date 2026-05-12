@@ -16,7 +16,7 @@ Do not preserve or reintroduce the old prototype architecture.
 Core code lives in `src/agentic_opt/`:
 
 - `common/`: low-level utilities
-- `control_plane/`: server-owned resources, artifact registry, environment service, job service, evaluation service, telemetry, and leaderboard/incumbent state
+- `control_plane/`: server-owned resources, artifact registry, environment service, job service, evaluation service, shared tools, task knowledge, network policy state, telemetry, and leaderboard/incumbent state
 - `worker_tools/`: agent-facing semantic CLI tools
 - `adapter/`: Codex/App Server integration, workspaces, and thin outer loop
 - `web/`: Flask + SQLite backend/routes
@@ -32,9 +32,10 @@ Tests live in `tests/`.
 - Keep the outer loop thin: sessions, workers, budgets, and stopping conditions only.
 - Do not encode a fixed numbered workflow in prompts, skills, or controller logic.
 - Agents should access history, artifacts, feedback, jobs, environments,
-  leaderboard/incumbent state, findings, and notebook checkpoints through
+  leaderboard/incumbent state, findings, notebook checkpoints, shared tools,
+  task knowledge, and network policy through
   semantic server tools: `ctx`, `artifact`, `eval`, `finding`, `notebook`,
-  `job`, `env`, and `telemetry`.
+  `job`, `env`, `telemetry`, `tool`, `knowledge`, and `network`.
 - Important unresolved design questions should be recorded in `docs/plan.md`.
 
 ## Commands
@@ -44,6 +45,9 @@ Tests live in `tests/`.
 - `PYTHONPATH=src python3 -m agentic_opt.adapter.semantic_worker --help`
 - `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli --help`
 - `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli env --help`
+- `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli tool --help`
+- `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli knowledge --help`
+- `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli network --help`
 - `PYTHONPATH=src python3 -m agentic_opt.web.app --help`
 
 ## Notes

@@ -19,11 +19,20 @@ the semantic wrappers and official task evaluation.
 | `ctx` | Read assignment, task contract, findings, artifacts, evaluations, jobs, environments, leaderboard, incumbent, telemetry, and notebook checkpoints. |
 | `artifact` | Register durable local files/directories and checkout the current incumbent candidate. |
 | `eval` | Request server-owned verify/probe/submit evaluation. |
-| `finding` | Share or search durable knowledge. Historical patterns are findings. |
+| `finding` | Share or search durable agent-authored findings. Historical patterns are findings. |
 | `notebook` | Checkpoint local notebook/worklog state to the server. |
 | `job` | Launch and inspect durable compute jobs. |
 | `env` | Inspect task environments and request worker dependency overlays. |
 | `telemetry` | Record non-official process/training metrics. |
+| `tool` | Publish, search, checkout, and install shared agent-authored tools. |
+| `knowledge` | List, inspect, and materialize curated read-only context packaged with the task. |
+| `network` | Inspect external internet policy and recorded access events. |
+
+Accepted near-term tool that is not implemented yet:
+
+| Command | Purpose |
+|---|---|
+| `trace` | Inspect, bundle, and export coding-agent execution traces. |
 
 ## Context
 
@@ -86,7 +95,7 @@ submission is a future policy/runner extension.
 
 ```bash
 job create --provider local --command '<command>' [--cwd <path>] [--env KEY=VALUE]
-job create --provider local-docker --image <image> --command '<command>' [--cwd <path>]
+job create --provider local-docker --image <image> --command '<command>' [--cwd <path>] [--network-mode <mode>] [--requires-control-plane]
 job create --provider runpod --template-id <template> --command '<command>' [--gpu-type-id <id>] [--gpu-count N] [--dry-run]
 job list
 job status <job-id>
@@ -99,6 +108,15 @@ The current job providers are local subprocess execution, a local Docker
 adapter, and a first RunPod provider path with dry-run support and provider
 status refresh. Job creation also accepts approval and estimated-cost metadata:
 `--requires-approval`, `--approved`, and `--estimated-cost-usd`.
+
+When experiment network policy sets `external_internet=deny`, Docker-backed
+local jobs are launched with `docker run --network none`. In that mode public
+internet is blocked by Docker rather than by prompt instruction. A worker cannot
+override the deny policy by requesting `bridge` or `host` networking. A Docker
+job that explicitly sets `--requires-control-plane` uses the server-owned
+Unix-socket control-plane relay. The relay socket is mounted into the container,
+`AO_CONTROL_API_URL` points at `unix:///ao-control/control.sock`, and Docker
+still runs with `--network none`.
 
 Provider-specific implementations should attach to the same durable `Job`
 resource contract rather than introducing task-specific worker commands.
@@ -122,12 +140,26 @@ provider. A worker that needs extra packages should request an overlay with
 the task base environment used for official scoring.
 
 Codex/App Server workers currently require network access so these commands can
-reach the local control-plane API. That access is for semantic server tools and
-approved runtime resources; workers should not use it to depend on hidden or
-non-public evaluator state.
+reach the local control-plane API. That implementation detail must not be
+treated as permission to search the public internet for optimization answers.
+The accepted policy split is:
+
+```text
+control-plane access: required for semantic tools
+external internet: allow, deny, or audit according to experiment policy
+```
+
+Turning off external internet must not disable `ctx`, `eval`, `artifact`,
+`finding`, `notebook`, `job`, `env`, or `telemetry`. Until the worker backend
+can enforce a localhost/control-plane allowlist, local Codex/App Server runs
+with external internet denied but general network technically available should
+be marked as policy-weakened in session and trace metadata. Docker-backed jobs
+are stricter: they use `--network none` for `external_internet=deny`, and
+Docker-backed workers use a Unix-socket control-plane relay instead of weakening
+the policy.
 
 The planned `docker_image` provider should use the same environment and overlay
-resource model.
+resource model plus the same Docker network enforcement rule.
 
 ## Findings And Notebook
 
@@ -138,9 +170,10 @@ notebook checkpoint (--content <text>|--file <path>) [--kind <kind>]
 notebook list
 ```
 
-Findings cover results, hypotheses, insights, errors, and reusable patterns.
-Notebook checkpoints make worker-local research state visible to the server and
-future workers without making the local workspace the source of truth.
+Findings cover agent-authored results, hypotheses, insights, errors, and
+reusable patterns. They are separate from curated task knowledge. Notebook
+checkpoints make worker-local research state visible to the server and future
+workers without making the local workspace the source of truth.
 
 ## Telemetry
 
@@ -156,3 +189,60 @@ telemetry finish <telemetry-id> [--status completed]
 
 Telemetry is server-owned but non-official. It helps inspect jobs and local
 experiments, but it does not update official evaluation or leaderboard state.
+
+## Accepted Near-Term Trace Surface
+
+```bash
+trace status
+trace bundle [--include-workspace-manifest] [--include-codex-home]
+trace export --provider local-jsonl|otlp|phoenix|helicone [--trace-id <id>]
+```
+
+Trace bundles should register raw Codex/App Server events, command IO, worker
+logs, notebook checkpoints, environment metadata, sandbox policy, and network
+policy as immutable server-indexed audit artifacts. Export providers such as
+OpenTelemetry OTLP, Arize Phoenix, and Helicone are observability mirrors; the
+local trace bundle remains the source of truth.
+
+## Shared Tools
+
+```bash
+tool publish --path local_tools/<name> --name <name> --description <text>
+tool list [query]
+tool show <tool-id>
+tool checkout <tool-id> --destination shared_tools/<name>
+tool install <tool-id>
+```
+
+Workers may draft helpers in `local_tools/`. Publishing creates a server-owned
+shared tool record backed by an artifact digest and linked to the session trace
+that produced it. Later workers can discover and checkout the tool without
+guessing another workspace's filesystem layout.
+
+## Knowledge
+
+```bash
+knowledge list [query]
+knowledge show <knowledge-id>
+knowledge materialize <knowledge-id> [--destination knowledge/<name>]
+```
+
+Knowledge items are curated, read-only files packaged with the task, such as
+papers, notes, references, public benchmark background, or dataset descriptions.
+They are different from findings: knowledge is provided by the task author;
+findings are produced by workers during the experiment.
+
+## Network
+
+```bash
+network status
+network policy
+network events
+```
+
+These commands expose whether external internet is allowed, denied, or only
+audited, and whether the current worker backend can actually enforce that
+policy. For Docker providers, the status also reports whether
+`docker_network_none` enforcement is paired with a configured control-plane
+relay. Package downloads should go through environment overlay policy rather
+than ad hoc internet use inside the worker shell.
