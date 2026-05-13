@@ -325,7 +325,7 @@ class ControlPlaneService:
         }
 
     def context_for_assignment(self, assignment_id: str) -> dict[str, Any]:
-        context = self.repository.context_for_assignment(assignment_id)
+        context = _worker_visible_context(self.repository.context_for_assignment(assignment_id))
         assignment = context["assignment"]
         context["knowledge_items"] = self.list_knowledge_items(task_id=assignment["task_id"])
         context["network_policy"] = self.network_policy({"assignment_id": assignment_id})
@@ -392,6 +392,184 @@ class ControlPlaneService:
             read_only=False,
         )
         return {"tool": tool, "artifact": artifact, "destination_path": str(destination)}
+
+    def bootstrap_workspace(self, assignment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assignment = self.repository.get_assignment(assignment_id)
+        if assignment is None:
+            raise KeyError(assignment_id)
+        experiment = self.repository.get_experiment(assignment["experiment_id"])
+        if experiment is None:
+            raise KeyError(assignment["experiment_id"])
+        workspace_root = Path(payload["workspace_root"]).resolve()
+        task = get_task(assignment["task_id"])
+        spec = candidate_spec_for(task)
+        entry_path = Path(payload.get("entry_path") or (workspace_root / spec.workspace_entrypoint)).resolve()
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        seed = self.resolve_workspace_seed(assignment_id)
+        seed_materialized = dict(seed)
+        if seed.get("artifact_id"):
+            artifact = self.repository.get_artifact(str(seed["artifact_id"]))
+            if artifact is None:
+                seed_materialized = {
+                    "kind": "public_seed",
+                    "source": "fallback",
+                    "reason": f"seed artifact not found: {seed['artifact_id']}",
+                    "materialized": False,
+                    "destination_path": str(entry_path),
+                }
+            elif not artifact.get("local_path"):
+                seed_materialized = {
+                    "kind": "public_seed",
+                    "source": "fallback",
+                    "reason": f"seed artifact has no local_path: {seed['artifact_id']}",
+                    "materialized": False,
+                    "destination_path": str(entry_path),
+                }
+            else:
+                _materialize_candidate_artifact(
+                    artifact=artifact,
+                    workspace_root=workspace_root,
+                    entry_path=entry_path,
+                )
+                seed_materialized = {
+                    **seed_materialized,
+                    "artifact": artifact,
+                    "materialized": True,
+                    "destination_path": str(entry_path),
+                }
+        else:
+            seed_materialized = {
+                **seed_materialized,
+                "materialized": False,
+                "destination_path": str(entry_path),
+            }
+
+        checked_out_tools = self.checkout_top_shared_tools(
+            assignment_id,
+            workspace_root=workspace_root,
+            limit=_auto_checkout_tool_limit(assignment=assignment, experiment=experiment, payload=payload),
+        )
+        bootstrap = {
+            "assignment_id": assignment_id,
+            "experiment_id": assignment["experiment_id"],
+            "task_id": assignment["task_id"],
+            "session_id": payload.get("session_id"),
+            "workspace_root": str(workspace_root),
+            "entry_path": str(entry_path),
+            "workspace_seed": seed_materialized,
+            "checked_out_tools": checked_out_tools,
+        }
+        self.repository.record_event(
+            {
+                "experiment_id": assignment["experiment_id"],
+                "assignment_id": assignment_id,
+                "session_id": payload.get("session_id"),
+                "task_id": assignment["task_id"],
+                "agent_id": assignment["agent_id"],
+                "event_type": "worker.workspace.bootstrapped",
+                "summary": _workspace_bootstrap_summary(bootstrap),
+                "payload": bootstrap,
+            }
+        )
+        return bootstrap
+
+    def resolve_workspace_seed(self, assignment_id: str) -> dict[str, Any]:
+        assignment = self.repository.get_assignment(assignment_id)
+        if assignment is None:
+            raise KeyError(assignment_id)
+        seed_policy = assignment.get("workspace_seed") or {}
+        if seed_policy.get("artifact_id"):
+            artifact_id = str(seed_policy["artifact_id"])
+            artifact = self.repository.get_artifact(artifact_id)
+            return {
+                "kind": "artifact",
+                "source": "assignment_workspace_seed",
+                "artifact_id": artifact_id,
+                "reason": None if artifact is not None else f"artifact not found: {artifact_id}",
+            }
+        mode = str(seed_policy.get("mode") or "auto")
+        experiment_id = assignment["experiment_id"]
+        direction_id = assignment.get("direction_id")
+        fallbacks: list[dict[str, Any]] = []
+        if mode in {"public_seed", "public", "fresh"}:
+            return {
+                "kind": "public_seed",
+                "source": "assignment_workspace_seed",
+                "reason": f"workspace_seed mode is {mode}",
+            }
+        if direction_id and mode not in {"global_incumbent", "global"}:
+            direction_incumbent = self.repository.get_incumbent(experiment_id=experiment_id, direction_id=direction_id)
+            if direction_incumbent is not None and direction_incumbent.get("artifact_id"):
+                return _seed_from_incumbent(
+                    kind="direction_incumbent",
+                    source="leaderboard",
+                    incumbent=direction_incumbent,
+                    fallback_chain=fallbacks,
+                )
+            fallbacks.append(
+                {
+                    "kind": "direction_incumbent",
+                    "direction_id": direction_id,
+                    "reason": "no direction incumbent artifact",
+                }
+            )
+        if mode not in {"direction_incumbent", "direction"}:
+            global_incumbent = self.repository.get_incumbent(experiment_id=experiment_id)
+            if global_incumbent is not None and global_incumbent.get("artifact_id"):
+                return _seed_from_incumbent(
+                    kind="global_incumbent",
+                    source="leaderboard",
+                    incumbent=global_incumbent,
+                    fallback_chain=fallbacks,
+                )
+            fallbacks.append({"kind": "global_incumbent", "reason": "no global incumbent artifact"})
+        return {
+            "kind": "public_seed",
+            "source": "public_task_seed",
+            "reason": "no usable incumbent artifact",
+            "fallback_chain": fallbacks,
+        }
+
+    def checkout_top_shared_tools(
+        self,
+        assignment_id: str,
+        *,
+        workspace_root: Path,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        assignment = self.repository.get_assignment(assignment_id)
+        if assignment is None:
+            raise KeyError(assignment_id)
+        tools = self.repository.list_shared_tools(
+            task_id=assignment["task_id"],
+            experiment_id=assignment["experiment_id"],
+        )[:limit]
+        checked_out: list[dict[str, Any]] = []
+        used_names: set[str] = set()
+        for tool in tools:
+            name = _safe_token(str(tool["name"]))
+            destination_name = name
+            if destination_name in used_names:
+                destination_name = f"{name}_{_safe_token(str(tool['tool_id']))}"
+            used_names.add(destination_name)
+            destination = workspace_root / "shared_tools" / destination_name
+            result = self.checkout_shared_tool(
+                str(tool["tool_id"]),
+                {"destination_path": str(destination), "force": True},
+            )
+            checked_out.append(
+                {
+                    "tool_id": tool["tool_id"],
+                    "name": tool["name"],
+                    "description": tool.get("description") or "",
+                    "entrypoint": tool.get("entrypoint"),
+                    "destination_path": result["destination_path"],
+                    "artifact_id": tool.get("artifact_id"),
+                }
+            )
+        return checked_out
 
     def list_knowledge_items(self, *, task_id: str, query: str | None = None) -> list[dict[str, Any]]:
         self.index_task_knowledge(task_id)
@@ -547,6 +725,119 @@ def _stable_knowledge_id(task_id: str, local_id: str) -> str:
 def _safe_token(raw: str) -> str:
     token = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
     return token or "item"
+
+
+def _seed_from_incumbent(
+    *,
+    kind: str,
+    source: str,
+    incumbent: dict[str, Any],
+    fallback_chain: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "source": source,
+        "leaderboard_entry_id": incumbent.get("leaderboard_entry_id"),
+        "artifact_id": incumbent.get("artifact_id"),
+        "score": incumbent.get("score"),
+        "direction_id": incumbent.get("direction_id"),
+        "evaluation_id": incumbent.get("evaluation_id"),
+        "fallback_chain": list(fallback_chain),
+    }
+
+
+def _auto_checkout_tool_limit(*, assignment: dict[str, Any], experiment: dict[str, Any], payload: dict[str, Any]) -> int:
+    if payload.get("shared_tool_limit") is not None:
+        return max(0, int(payload["shared_tool_limit"]))
+    seed_policy = assignment.get("workspace_seed") or {}
+    if seed_policy.get("shared_tool_limit") is not None:
+        return max(0, int(seed_policy["shared_tool_limit"]))
+    config = experiment.get("config") or {}
+    policy = experiment.get("policy") or {}
+    shared_tools_config = config.get("shared_tools") or policy.get("shared_tools") or {}
+    if isinstance(shared_tools_config, dict) and shared_tools_config.get("auto_checkout_limit") is not None:
+        return max(0, int(shared_tools_config["auto_checkout_limit"]))
+    return 5
+
+
+def _workspace_bootstrap_summary(bootstrap: dict[str, Any]) -> str:
+    seed = bootstrap.get("workspace_seed") or {}
+    seed_kind = seed.get("kind") or "unknown"
+    tool_count = len(bootstrap.get("checked_out_tools") or [])
+    if seed.get("artifact_id"):
+        return f"workspace bootstrapped from {seed_kind} artifact {seed['artifact_id']} with {tool_count} shared tools"
+    return f"workspace bootstrapped from {seed_kind} with {tool_count} shared tools"
+
+
+def _materialize_candidate_artifact(*, artifact: dict[str, Any], workspace_root: Path, entry_path: Path) -> None:
+    source = Path(artifact["local_path"]).resolve()
+    metadata = artifact.get("metadata") or {}
+    if not source.is_dir():
+        _copy_materialized_path(source=source, destination=entry_path, force=True, read_only=False)
+        return
+    candidate_root = metadata.get("candidate_root")
+    if candidate_root:
+        destination = (workspace_root / str(candidate_root)).resolve()
+        if not destination.is_relative_to(workspace_root):
+            raise PermissionError(f"candidate root must stay inside workspace: {candidate_root}")
+        _copy_materialized_path(source=source, destination=destination, force=True, read_only=False)
+        return
+    _copy_directory_contents(source=source, destination=entry_path.parent)
+
+
+def _copy_directory_contents(*, source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for item in sorted(source.rglob("*")):
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        shutil.copy2(item, target)
+
+
+_WORKER_HIDDEN_METADATA_KEYS = {
+    "auto_continue",
+    "budget_exhausted",
+    "global_stop_condition",
+    "resume",
+    "resume_after_strict_safe_scoring_fix",
+    "resume_budget_total_evaluator_runs",
+    "resume_to_exhaust_eval_budget",
+    "stop_condition",
+}
+
+
+def _worker_visible_context(context: dict[str, Any]) -> dict[str, Any]:
+    visible = dict(context)
+    visible["assignment"] = _worker_visible_record(context.get("assignment") or {})
+    visible["experiment"] = _worker_visible_record(context.get("experiment") or {})
+    return visible
+
+
+def _worker_visible_record(record: dict[str, Any]) -> dict[str, Any]:
+    visible = dict(record)
+    visible.pop("budget", None)
+    visible.pop("config", None)
+    if isinstance(visible.get("metadata"), dict):
+        visible["metadata"] = {
+            key: value
+            for key, value in visible["metadata"].items()
+            if key not in _WORKER_HIDDEN_METADATA_KEYS and "budget" not in key.lower()
+        }
+    if isinstance(visible.get("policy"), dict):
+        visible["policy"] = {
+            key: value
+            for key, value in visible["policy"].items()
+            if key not in {"jobs", "budget"}
+        }
+    return visible
 
 
 def _copy_materialized_path(*, source: Path, destination: Path, force: bool, read_only: bool) -> None:

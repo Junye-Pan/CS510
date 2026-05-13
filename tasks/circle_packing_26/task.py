@@ -595,7 +595,7 @@ class CirclePacking26Task:
                 "radii",
             }
         }
-        score = diagnostics["actual_sum"] if diagnostics["valid"] else diagnostics["strict_safe_score"]
+        score = diagnostics["strict_safe_score"]
         return {
             "ok": True,
             "valid": bool(diagnostics["valid"]),
@@ -611,19 +611,26 @@ class CirclePacking26Task:
         diagnostics = analyze_output(run_output)
         if not diagnostics["valid"]:
             raise ValueError(diagnostics["error"] or "evaluation failed")
+        score = diagnostics["strict_safe_score"]
+        if score is None:
+            raise ValueError(diagnostics["strict_safe_error"] or "strict safe scoring failed")
         np = _np()
         centers = diagnostics["centers"]
         radii = diagnostics["radii"]
         reported_sum = float(diagnostics["reported_sum"])
         actual_sum = float(diagnostics["actual_sum"])
         return {
-            "score": actual_sum,
+            "score": score,
             "valid": True,
             "correct": {"correct": True, "error": None},
             "metrics": {
-                "combined_score": actual_sum,
+                "combined_score": score,
                 "reported_sum": reported_sum,
                 "actual_sum": actual_sum,
+                "strict_safe_score": score,
+                "strict_safe_gap": diagnostics["strict_safe_gap"],
+                "strict_safe_min_boundary_slack": diagnostics["strict_safe_min_boundary_slack"],
+                "strict_safe_min_pair_slack": diagnostics["strict_safe_min_pair_slack"],
                 "execution_time_s": execution_s,
                 "min_boundary_slack": diagnostics["min_boundary_slack"],
                 "min_pair_slack": diagnostics["min_pair_slack"],
@@ -634,9 +641,10 @@ class CirclePacking26Task:
                 "min_radius": float(np.min(radii)),
             },
             "evaluator": {
-                "score": actual_sum,
+                "score": score,
                 "public_details": {
                     "num_circles": EXPECTED_CIRCLES,
+                    "strict_safe_score": score,
                     "actual_sum": actual_sum,
                     "reported_sum": reported_sum,
                     "min_slack": float(min(diagnostics["min_boundary_slack"], diagnostics["min_pair_slack"] or 0.0)),

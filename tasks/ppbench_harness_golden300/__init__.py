@@ -1,2 +1,0 @@
-"""PPBench harness optimization task."""
-

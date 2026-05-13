@@ -48,9 +48,9 @@ class PolicyService:
         max_jobs = job_policy.get("max_jobs", budget.get("max_jobs"))
         if max_jobs is not None and experiment_id:
             current_jobs = self.repository.list_jobs(experiment_id=experiment_id)
-            non_blocked_jobs = [item for item in current_jobs if item["status"] != "blocked"]
-            if len(non_blocked_jobs) >= int(max_jobs):
-                return PolicyDecision(False, reason="max_jobs_exceeded", estimated_cost=estimated, details={"max_jobs": int(max_jobs)})
+            active_jobs = [item for item in current_jobs if item["status"] in {"queued", "running"}]
+            if len(active_jobs) >= int(max_jobs):
+                return PolicyDecision(False, reason="max_jobs_exceeded", estimated_cost=estimated, details={"active_jobs": len(active_jobs), "max_jobs": int(max_jobs)})
 
         max_job_cost = job_policy.get("max_cost_usd", budget.get("max_job_cost_usd"))
         estimated_usd = estimated.get("estimated_usd")
@@ -120,4 +120,3 @@ def estimated_cost(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
     return {}
-

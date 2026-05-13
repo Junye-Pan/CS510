@@ -50,6 +50,7 @@ class EvaluationService:
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = self._normalize_request(payload)
+        self._enforce_evaluator_budget(request)
         if _leaderboard_eligible_kind(request["kind"]) and request.get("artifact_id") is None and payload.get("snapshot_candidate", True):
             artifact = self._snapshot_candidate_for_evaluation(request)
             request = {
@@ -212,6 +213,24 @@ class EvaluationService:
             "requested_environment_id": payload.get("environment_id"),
             "requested_environment_overlay_id": payload.get("environment_overlay_id") or payload.get("overlay_id"),
         }
+
+    def _enforce_evaluator_budget(self, request: dict[str, Any]) -> None:
+        experiment_id = request.get("experiment_id")
+        experiment = self.repository.get_experiment(experiment_id) if experiment_id else None
+        experiment_budget = (experiment or {}).get("budget") or {}
+        experiment_limit = _positive_int(experiment_budget.get("total_evaluator_runs") or experiment_budget.get("evaluator_runs"))
+        if experiment_limit is not None and experiment_id:
+            experiment_used = _count_evaluator_runs(self.repository.list_evaluations(experiment_id=experiment_id))
+            if experiment_used >= experiment_limit:
+                raise ValueError("evaluator_budget_exhausted: experiment evaluator budget exhausted")
+
+        assignment_id = request.get("assignment_id")
+        assignment = self.repository.get_assignment(assignment_id) if assignment_id else None
+        assignment_limit = _positive_int(((assignment or {}).get("budget") or {}).get("evaluator_runs"))
+        if assignment_limit is not None and assignment_id:
+            assignment_used = _count_evaluator_runs(self.repository.list_evaluations(assignment_id=assignment_id))
+            if assignment_used >= assignment_limit:
+                raise ValueError("evaluator_budget_exhausted: assignment evaluator budget exhausted")
 
     def _run_request(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool, float | None, dict[str, Any]]:
         task = get_task(request["task_id"])
@@ -428,6 +447,20 @@ def _evaluation_async_requested(payload: dict[str, Any], kind: str) -> bool:
     if "run_async" in payload:
         return bool(payload["run_async"])
     return kind in {"submit", "official"}
+
+
+def _count_evaluator_runs(evaluations: list[dict[str, Any]]) -> int:
+    return sum(1 for item in evaluations if item.get("status") != "cancelled")
+
+
+def _positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _leaderboard_eligible_kind(kind: str | None) -> bool:

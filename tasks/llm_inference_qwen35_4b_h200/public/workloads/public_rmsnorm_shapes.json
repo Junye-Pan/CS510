@@ -1,0 +1,18 @@
+{
+  "definition": "qwen_rmsnorm_h2560_fp16",
+  "visibility": "public",
+  "shapes": [
+    {
+      "num_tokens": 1,
+      "hidden": 2560
+    },
+    {
+      "num_tokens": 8,
+      "hidden": 2560
+    },
+    {
+      "num_tokens": 128,
+      "hidden": 2560
+    }
+  ]
+}

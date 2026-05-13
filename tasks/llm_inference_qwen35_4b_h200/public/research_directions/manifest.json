@@ -1,0 +1,22 @@
+{
+  "directions": [
+    {
+      "direction_id": "baseline_rmsnorm_contract",
+      "title": "Validate the RMSNorm Contract",
+      "doc_path": "research_directions/baseline_rmsnorm_contract.md",
+      "tags": ["rmsnorm", "correctness", "manifest"]
+    },
+    {
+      "direction_id": "triton_rmsnorm_kernel",
+      "title": "Implement a Triton RMSNorm Kernel",
+      "doc_path": "research_directions/triton_rmsnorm_kernel.md",
+      "tags": ["rmsnorm", "triton", "performance"]
+    },
+    {
+      "direction_id": "dispatch_guards",
+      "title": "Tune Dispatch Guards",
+      "doc_path": "research_directions/dispatch_guards.md",
+      "tags": ["apply-runtime", "shape-guards", "fallback"]
+    }
+  ]
+}

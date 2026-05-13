@@ -13,6 +13,7 @@ from pathlib import Path
 
 from agentic_opt.control_plane.client import ControlPlaneClient, ControlPlaneClientError
 from agentic_opt.control_plane.jobs import DockerNetworkPolicyError, JobService, build_local_docker_command
+from agentic_opt.control_plane.policy import PolicyService
 from agentic_opt.control_plane.relay import ControlPlaneRelayServer, relay_url
 from agentic_opt.web.app import create_app
 from agentic_opt.web.workers import WorkerManager, WorkerProcess
@@ -58,7 +59,7 @@ class WebBackendTests(unittest.TestCase):
             json={
                 "task_id": "toy_eval",
                 "mode": "local",
-                "budget": {"total_evaluator_runs": 4},
+                "budget": {"total_evaluator_runs": 6},
                 "policy": {"network": {"external_internet": "deny"}},
                 "assignment_count": 2,
             },
@@ -88,6 +89,8 @@ class WebBackendTests(unittest.TestCase):
         context = self.client.get("/api/v1/context", query_string={"assignment_id": assignment_id})
         self.assertEqual(context.status_code, 200)
         self.assertEqual(context.get_json()["assignment"]["assignment_id"], assignment_id)
+        self.assertNotIn("budget", context.get_json()["assignment"])
+        self.assertNotIn("budget", context.get_json()["experiment"])
         self.assertTrue(context.get_json()["environments"])
         self.assertEqual(context.get_json()["network_policy"]["policy"]["external_internet"], "deny")
         self.assertTrue(context.get_json()["network_policy"]["enforcement"]["policy_weakened"])
@@ -394,6 +397,98 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(trace.status_code, 200)
         self.assertEqual(trace.get_json()["session"]["session_id"], session_id)
 
+    def test_workspace_bootstrap_uses_direction_incumbent_and_shared_tools(self) -> None:
+        ctx = self.client.application.config["AO_CONTEXT"]
+        experiment = ctx.control.create_experiment(
+            {
+                "task_id": "toy_eval",
+                "mode": "local",
+                "config": {"shared_tools": {"auto_checkout_limit": 2}},
+            }
+        )
+        assignment = ctx.control.create_assignment(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "task_id": "toy_eval",
+                "agent_id": "agent_001",
+                "direction_id": "explore_a",
+            }
+        )
+
+        global_seed = self.root / "global_seed.py"
+        global_seed.write_text("def solve():\n    return 'global'\n", encoding="utf-8")
+        direction_seed = self.root / "direction_seed.py"
+        direction_seed.write_text("def solve():\n    return 'direction'\n", encoding="utf-8")
+        global_artifact = self.client.post(
+            "/api/v1/artifacts",
+            json={
+                "experiment_id": experiment["experiment_id"],
+                "assignment_id": assignment["assignment_id"],
+                "kind": "candidate",
+                "path": str(global_seed),
+            },
+        ).get_json()
+        direction_artifact = self.client.post(
+            "/api/v1/artifacts",
+            json={
+                "experiment_id": experiment["experiment_id"],
+                "assignment_id": assignment["assignment_id"],
+                "kind": "candidate",
+                "path": str(direction_seed),
+            },
+        ).get_json()
+        ctx.control.create_leaderboard_entry(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "task_id": "toy_eval",
+                "evaluation_id": "eval_global_seed",
+                "artifact_id": global_artifact["artifact_id"],
+                "score": 10.0,
+            }
+        )
+        ctx.control.create_leaderboard_entry(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "task_id": "toy_eval",
+                "assignment_id": assignment["assignment_id"],
+                "direction_id": "explore_a",
+                "evaluation_id": "eval_direction_seed",
+                "artifact_id": direction_artifact["artifact_id"],
+                "score": 2.0,
+            }
+        )
+
+        for index in range(3):
+            tool_source = self.root / f"tool_{index}.py"
+            tool_source.write_text(f"print('tool {index}')\n", encoding="utf-8")
+            tool = self.client.post(
+                "/api/v1/shared-tools",
+                json={
+                    "experiment_id": experiment["experiment_id"],
+                    "assignment_id": assignment["assignment_id"],
+                    "task_id": "toy_eval",
+                    "path": str(tool_source),
+                    "name": f"tool-{index}",
+                    "description": "reusable helper",
+                    "entrypoint": tool_source.name,
+                },
+            )
+            self.assertEqual(tool.status_code, 201, tool.get_data(as_text=True))
+
+        workspace_root = self.root / "workspace_bootstrap"
+        bootstrap = self.client.post(
+            f"/api/v1/assignments/{assignment['assignment_id']}/workspace-bootstrap",
+            json={"workspace_root": str(workspace_root), "session_id": "session_bootstrap"},
+        )
+        self.assertEqual(bootstrap.status_code, 201, bootstrap.get_data(as_text=True))
+        payload = bootstrap.get_json()
+        self.assertEqual(payload["workspace_seed"]["kind"], "direction_incumbent")
+        self.assertEqual(payload["workspace_seed"]["artifact_id"], direction_artifact["artifact_id"])
+        self.assertIn("return 'direction'", (workspace_root / "initial.py").read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["checked_out_tools"]), 2)
+        for checked_out in payload["checked_out_tools"]:
+            self.assertTrue(Path(checked_out["destination_path"]).exists())
+
     def test_worker_manager_reaper_removes_finished_process(self) -> None:
         ctx = self.client.application.config["AO_CONTEXT"]
         manager = WorkerManager(
@@ -489,6 +584,244 @@ class WebBackendTests(unittest.TestCase):
         self.assertEqual(experiment["status"], "completed")
         self.assertEqual(experiment["metadata"]["status_rollup"]["source"], "control_plane_resource_rollup")
 
+    def test_max_jobs_counts_active_jobs_only(self) -> None:
+        ctx = self.client.application.config["AO_CONTEXT"]
+        experiment = ctx.control.create_experiment(
+            {
+                "task_id": "toy_eval",
+                "mode": "local",
+                "budget": {"max_jobs": 1},
+            }
+        )
+        ctx.control.create_job(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "provider": "local",
+                "status": "completed",
+                "inputs": {"command": [sys.executable, "-c", "print('done')"]},
+            }
+        )
+        policy = PolicyService(ctx.control)
+        allowed_after_completed = policy.decide_job(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "provider": "local",
+                "inputs": {"command": [sys.executable, "-c", "print('next')"]},
+            }
+        )
+        self.assertTrue(allowed_after_completed.allowed)
+
+        ctx.control.create_job(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "provider": "local",
+                "status": "running",
+                "inputs": {"command": [sys.executable, "-c", "print('active')"]},
+            }
+        )
+        blocked_with_active = policy.decide_job(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "provider": "local",
+                "inputs": {"command": [sys.executable, "-c", "print('blocked')"]},
+            }
+        )
+        self.assertFalse(blocked_with_active.allowed)
+        self.assertEqual(blocked_with_active.reason, "max_jobs_exceeded")
+
+    def test_worker_reaper_auto_continues_assignment_until_evaluator_budget(self) -> None:
+        ctx, experiment, assignment, session = self._completed_budgeted_assignment(total_budget=3, assignment_budget=3, used_evals=1)
+        manager = WorkerManager(repo_root=self.root, state_root=self.state_root, control=ctx.control, reaper_interval_s=None)
+        started = []
+
+        def fake_start_control_assignment(**kwargs):
+            started.append(kwargs)
+            return ctx.control.create_session(
+                {
+                    "assignment_id": kwargs["assignment_id"],
+                    "status": "running",
+                    "details": {"api_url": kwargs["api_url"], "dry_run": kwargs["dry_run"]},
+                }
+            )
+
+        manager.start_control_assignment = fake_start_control_assignment  # type: ignore[method-assign]
+        continuation = manager._maybe_continue_assignment(
+            {
+                "assignment_id": assignment["assignment_id"],
+                "session_id": session["session_id"],
+                "experiment_id": experiment["experiment_id"],
+                "returncode": 0,
+                "api_url": "http://127.0.0.1:5010",
+                "dry_run": False,
+                "max_turn_wall_time_s": 123,
+            }
+        )
+
+        self.assertIsNotNone(continuation)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["assignment_id"], assignment["assignment_id"])
+        self.assertEqual(started[0]["max_turn_wall_time_s"], 123)
+        self.assertEqual(ctx.control.get_assignment(assignment["assignment_id"])["status"], "running")
+        self.assertEqual(ctx.control.get_experiment(experiment["experiment_id"])["status"], "running")
+        events = ctx.control.list_events(assignment_id=assignment["assignment_id"])
+        self.assertTrue(any(event["event_type"] == "assignment.auto_continue" for event in events))
+
+    def test_worker_reaper_marks_budget_exhausted_without_continuation(self) -> None:
+        ctx, experiment, assignment, session = self._completed_budgeted_assignment(total_budget=1, assignment_budget=1, used_evals=1)
+        manager = WorkerManager(repo_root=self.root, state_root=self.state_root, control=ctx.control, reaper_interval_s=None)
+
+        def fail_start_control_assignment(**kwargs):
+            raise AssertionError("budget-exhausted assignment should not continue")
+
+        manager.start_control_assignment = fail_start_control_assignment  # type: ignore[method-assign]
+        continuation = manager._maybe_continue_assignment(
+            {
+                "assignment_id": assignment["assignment_id"],
+                "session_id": session["session_id"],
+                "experiment_id": experiment["experiment_id"],
+                "returncode": 0,
+            }
+        )
+
+        self.assertIsNone(continuation)
+        updated = ctx.control.get_assignment(assignment["assignment_id"])
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["metadata"]["budget_exhausted"]["source"], "worker_reaper")
+        events = ctx.control.list_events(assignment_id=assignment["assignment_id"])
+        self.assertTrue(any(event["event_type"] == "assignment.budget_exhausted" for event in events))
+
+    def test_worker_reaper_continues_after_local_stop_condition(self) -> None:
+        ctx, experiment, assignment, session = self._completed_budgeted_assignment(total_budget=3, assignment_budget=3, used_evals=1)
+        session = ctx.control.update_session(
+            session["session_id"],
+            {
+                "details": {
+                    "local_stop_condition": {
+                        "source": "worker",
+                        "scope": "local",
+                        "reason": "current basin did not improve",
+                    }
+                }
+            },
+        )
+        manager = WorkerManager(repo_root=self.root, state_root=self.state_root, control=ctx.control, reaper_interval_s=None)
+        started = []
+
+        def fake_start_control_assignment(**kwargs):
+            started.append(kwargs)
+            return ctx.control.create_session({"assignment_id": kwargs["assignment_id"], "status": "running"})
+
+        manager.start_control_assignment = fake_start_control_assignment  # type: ignore[method-assign]
+        continuation = manager._maybe_continue_assignment(
+            {
+                "assignment_id": assignment["assignment_id"],
+                "session_id": session["session_id"],
+                "experiment_id": experiment["experiment_id"],
+                "returncode": 0,
+                "api_url": "http://127.0.0.1:5010",
+            }
+        )
+
+        self.assertIsNotNone(continuation)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(ctx.control.get_assignment(assignment["assignment_id"])["status"], "running")
+
+    def test_worker_reaper_respects_global_stop_condition(self) -> None:
+        ctx, experiment, assignment, session = self._completed_budgeted_assignment(
+            total_budget=3,
+            assignment_budget=3,
+            used_evals=1,
+            metadata={"global_stop_condition": {"source": "worker", "scope": "global", "reason": "converged"}},
+        )
+        manager = WorkerManager(repo_root=self.root, state_root=self.state_root, control=ctx.control, reaper_interval_s=None)
+
+        def fail_start_control_assignment(**kwargs):
+            raise AssertionError("global stop condition should not continue")
+
+        manager.start_control_assignment = fail_start_control_assignment  # type: ignore[method-assign]
+        continuation = manager._maybe_continue_assignment(
+            {
+                "assignment_id": assignment["assignment_id"],
+                "session_id": session["session_id"],
+                "experiment_id": experiment["experiment_id"],
+                "returncode": 0,
+            }
+        )
+
+        self.assertIsNone(continuation)
+        updated = ctx.control.get_assignment(assignment["assignment_id"])
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["metadata"]["global_stop_condition"]["reason"], "converged")
+
+    def test_worker_reaper_auto_continues_after_turn_timeout(self) -> None:
+        ctx, experiment, assignment, session = self._completed_budgeted_assignment(
+            total_budget=3,
+            assignment_budget=3,
+            used_evals=1,
+            session_status="stopped",
+            stop_reason="turn_timeout",
+        )
+        manager = WorkerManager(repo_root=self.root, state_root=self.state_root, control=ctx.control, reaper_interval_s=None)
+        started = []
+
+        def fake_start_control_assignment(**kwargs):
+            started.append(kwargs)
+            return ctx.control.create_session({"assignment_id": kwargs["assignment_id"], "status": "running"})
+
+        manager.start_control_assignment = fake_start_control_assignment  # type: ignore[method-assign]
+        continuation = manager._maybe_continue_assignment(
+            {
+                "assignment_id": assignment["assignment_id"],
+                "session_id": session["session_id"],
+                "experiment_id": experiment["experiment_id"],
+                "returncode": 0,
+                "api_url": "http://127.0.0.1:5010",
+            }
+        )
+
+        self.assertIsNotNone(continuation)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(ctx.control.get_assignment(assignment["assignment_id"])["status"], "running")
+
+    def test_evaluation_api_enforces_evaluator_budget(self) -> None:
+        created = self.client.post(
+            "/api/v1/experiments",
+            json={"task_id": "toy_eval", "mode": "local", "budget": {"total_evaluator_runs": 1}, "assignment_count": 1},
+        )
+        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        experiment_id = created.get_json()["experiment"]["experiment_id"]
+        assignment_id = created.get_json()["assignments"][0]["assignment_id"]
+        entry_path = self.tasks_root / "toy_eval" / "public" / "initial.py"
+
+        first = self.client.post(
+            "/api/v1/evaluations",
+            json={
+                "experiment_id": experiment_id,
+                "assignment_id": assignment_id,
+                "task_id": "toy_eval",
+                "kind": "verify",
+                "entry_path": str(entry_path),
+                "async": False,
+            },
+        )
+        self.assertEqual(first.status_code, 201, first.get_data(as_text=True))
+
+        second = self.client.post(
+            "/api/v1/evaluations",
+            json={
+                "experiment_id": experiment_id,
+                "assignment_id": assignment_id,
+                "task_id": "toy_eval",
+                "kind": "verify",
+                "entry_path": str(entry_path),
+                "async": False,
+            },
+        )
+        self.assertEqual(second.status_code, 400)
+        self.assertIn("evaluator_budget_exhausted", second.get_json()["error"])
+        ctx = self.client.application.config["AO_CONTEXT"]
+        self.assertEqual(len(ctx.control.list_evaluations(assignment_id=assignment_id)), 1)
+
     def test_docker_network_enforcement_command_builder(self) -> None:
         command, enforcement = build_local_docker_command(
             image="python:3.11",
@@ -560,6 +893,59 @@ class WebBackendTests(unittest.TestCase):
             relay.server_close()
             target.shutdown()
             target.server_close()
+
+    def _completed_budgeted_assignment(
+        self,
+        *,
+        total_budget: int,
+        assignment_budget: int,
+        used_evals: int,
+        metadata: dict | None = None,
+        session_status: str = "completed",
+        stop_reason: str = "turn_completed",
+    ) -> tuple[object, dict, dict, dict]:
+        ctx = self.client.application.config["AO_CONTEXT"]
+        experiment = ctx.control.create_experiment(
+            {
+                "task_id": "toy_eval",
+                "mode": "local",
+                "budget": {"total_evaluator_runs": total_budget},
+            }
+        )
+        assignment = ctx.control.create_assignment(
+            {
+                "experiment_id": experiment["experiment_id"],
+                "task_id": "toy_eval",
+                "agent_id": "agent_001",
+                "budget": {"evaluator_runs": assignment_budget},
+                "metadata": metadata or {},
+            }
+        )
+        session = ctx.control.create_session(
+            {
+                "assignment_id": assignment["assignment_id"],
+                "status": "running",
+                "details": {"api_url": "http://127.0.0.1:5010"},
+            }
+        )
+        for index in range(used_evals):
+            ctx.control.create_evaluation(
+                {
+                    "evaluation_id": f"eval_budget_test_{index}",
+                    "experiment_id": experiment["experiment_id"],
+                    "assignment_id": assignment["assignment_id"],
+                    "task_id": "toy_eval",
+                    "kind": "submit",
+                    "status": "completed",
+                    "valid": True,
+                    "score": float(index),
+                }
+            )
+        session = ctx.control.update_session(
+            session["session_id"],
+            {"status": session_status, "details": {"stop_reason": stop_reason}},
+        )
+        return ctx, experiment, assignment, session
 
     def _wait_for(self, path: str, *, timeout_s: float = 10.0) -> dict:
         deadline = time.time() + timeout_s

@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ class EnvironmentService:
         self.repository = repository
         self.environment_root = environment_root.resolve()
         self.environment_root.mkdir(parents=True, exist_ok=True)
+        self._task_environment_lock = threading.Lock()
 
     def ensure_framework_environment(self) -> dict[str, Any]:
         python_path = Path(sys.executable).resolve()
@@ -49,28 +51,29 @@ class EnvironmentService:
         )
 
     def ensure_task_environment(self, task_id: str, *, experiment_id: str | None = None) -> dict[str, Any]:
-        task = get_task(task_id)
-        prepared = prepare_task_runtime(task, envs_root=self.environment_root / "tasks")
-        environment_id = _task_environment_id(task_id=task_id, fingerprint=prepared.fingerprint)
-        existing = self.repository.get_environment(environment_id)
-        record = self.repository.upsert_environment(
-            {
-                "environment_id": environment_id,
-                "environment_type": "task",
-                "status": "ready",
-                "fingerprint": prepared.fingerprint,
-                "python_path": str(prepared.python_path),
-                "root_path": str(prepared.root),
-                "task_id": task_id,
-                "experiment_id": experiment_id,
-                "spec": prepared.spec.to_jsonable(),
-                "lock": _pip_freeze(prepared.python_path),
-                "metadata": {
-                    "manifest_path": str(prepared.manifest_path),
-                    "venv_dir": str(prepared.venv_dir),
-                },
-            }
-        )
+        with self._task_environment_lock:
+            task = get_task(task_id)
+            prepared = prepare_task_runtime(task, envs_root=self.environment_root / "tasks")
+            environment_id = _task_environment_id(task_id=task_id, fingerprint=prepared.fingerprint)
+            existing = self.repository.get_environment(environment_id)
+            record = self.repository.upsert_environment(
+                {
+                    "environment_id": environment_id,
+                    "environment_type": "task",
+                    "status": "ready",
+                    "fingerprint": prepared.fingerprint,
+                    "python_path": str(prepared.python_path),
+                    "root_path": str(prepared.root),
+                    "task_id": task_id,
+                    "experiment_id": experiment_id,
+                    "spec": prepared.spec.to_jsonable(),
+                    "lock": _pip_freeze(prepared.python_path),
+                    "metadata": {
+                        "manifest_path": str(prepared.manifest_path),
+                        "venv_dir": str(prepared.venv_dir),
+                    },
+                }
+            )
         if existing is None:
             self.repository.record_event(
                 {

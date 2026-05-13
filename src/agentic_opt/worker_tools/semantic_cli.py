@@ -83,6 +83,66 @@ def command_ctx(args: argparse.Namespace) -> int:
         )
     elif args.ctx_command == "network":
         _emit(client.get("/api/v1/network-policy", {"assignment_id": assignment_id, "session_id": os.environ.get("AO_SESSION_ID")}))
+    elif args.ctx_command in {"stop", "local-stop", "local_stop"}:
+        session_id = _env("AO_SESSION_ID")
+        reason = args.reason.strip()
+        if not reason:
+            raise ValueError("--reason must not be empty")
+        local_stop = {
+            "source": "worker",
+            "scope": "local",
+            "session_id": session_id,
+            "reason": reason,
+        }
+        session = client.patch(f"/api/v1/sessions/{session_id}", {"details": {"local_stop_condition": local_stop}})
+        client.post(
+            "/api/v1/events",
+            {
+                "experiment_id": _env("AO_EXPERIMENT_ID"),
+                "assignment_id": assignment_id,
+                "session_id": session_id,
+                "task_id": args.task_id or _env("AO_TASK_ID"),
+                "agent_id": _env("AO_AGENT_ID"),
+                "event_type": "session.local_stop",
+                "summary": reason,
+                "payload": local_stop,
+            },
+        )
+        _emit(session)
+    elif args.ctx_command in {"global-stop", "global_stop"}:
+        session_id = _env("AO_SESSION_ID")
+        reason = args.reason.strip()
+        if not reason:
+            raise ValueError("--reason must not be empty")
+        if not args.confirm_global_stop:
+            raise ValueError("global stop requires --confirm-global-stop")
+        global_stop = {
+            "source": "worker",
+            "scope": "global",
+            "session_id": session_id,
+            "reason": reason,
+        }
+        payload = {
+            "status": "completed",
+            "metadata": {
+                "global_stop_condition": global_stop,
+            },
+        }
+        assignment = client.patch(f"/api/v1/assignments/{assignment_id}", payload)
+        client.post(
+            "/api/v1/events",
+            {
+                "experiment_id": _env("AO_EXPERIMENT_ID"),
+                "assignment_id": assignment_id,
+                "session_id": session_id,
+                "task_id": args.task_id or _env("AO_TASK_ID"),
+                "agent_id": _env("AO_AGENT_ID"),
+                "event_type": "assignment.global_stop",
+                "summary": reason,
+                "payload": global_stop,
+            },
+        )
+        _emit(assignment)
     else:
         raise ValueError(args.ctx_command)
     return 0
@@ -540,6 +600,18 @@ def build_parser() -> argparse.ArgumentParser:
     ctx_tools = ctx_sub.add_parser("shared-tools")
     ctx_tools.add_argument("query", nargs="?")
     ctx_sub.add_parser("network")
+    ctx_stop = ctx_sub.add_parser("stop")
+    ctx_stop.add_argument("--reason", required=True)
+    ctx_local_stop = ctx_sub.add_parser("local-stop")
+    ctx_local_stop.add_argument("--reason", required=True)
+    ctx_local_stop_alias = ctx_sub.add_parser("local_stop")
+    ctx_local_stop_alias.add_argument("--reason", required=True)
+    ctx_global_stop = ctx_sub.add_parser("global-stop")
+    ctx_global_stop.add_argument("--reason", required=True)
+    ctx_global_stop.add_argument("--confirm-global-stop", action="store_true")
+    ctx_global_stop_alias = ctx_sub.add_parser("global_stop")
+    ctx_global_stop_alias.add_argument("--reason", required=True)
+    ctx_global_stop_alias.add_argument("--confirm-global-stop", action="store_true")
     leaderboard = ctx_sub.add_parser("leaderboard")
     leaderboard.add_argument("--limit", type=int, default=20)
     incumbent = ctx_sub.add_parser("incumbent")

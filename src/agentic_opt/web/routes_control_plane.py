@@ -147,6 +147,13 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
         except Exception as exc:
             return _error(exc, 404)
 
+    @app.post("/api/v1/assignments/<assignment_id>/workspace-bootstrap")
+    def control_bootstrap_workspace(assignment_id: str):
+        try:
+            return jsonify(ctx.control_service.bootstrap_workspace(assignment_id, _payload())), 201
+        except Exception as exc:
+            return _error(exc, 404)
+
     @app.post("/api/v1/assignments/<assignment_id>/start-local")
     def control_start_local_assignment(assignment_id: str):
         try:

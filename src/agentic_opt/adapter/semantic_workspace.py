@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import shlex
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from agentic_opt.common.atomic import atomic_write_text
 from agentic_opt.common.config import get_repo_root
@@ -25,6 +27,8 @@ class SemanticWorkspace:
     readable_roots: list[str]
     writable_roots: list[str]
     network_policy: dict[str, object]
+    workspace_seed: dict[str, Any] = field(default_factory=dict)
+    checked_out_tools: list[dict[str, Any]] = field(default_factory=list)
 
 
 def prepare_semantic_workspace(
@@ -35,6 +39,7 @@ def prepare_semantic_workspace(
     session_id: str,
     runtime_env: PreparedRuntimeEnv | None = None,
     network_policy: dict[str, object] | None = None,
+    bootstrap: dict[str, Any] | None = None,
 ) -> SemanticWorkspace:
     workspace_root = workspace_root.resolve()
     workspace_root.mkdir(parents=True, exist_ok=True)
@@ -49,6 +54,8 @@ def prepare_semantic_workspace(
     network_policy = network_policy or {}
     for relative in ("reference", "artifacts", "findings", "local_tools", "shared_tools", "knowledge"):
         (workspace_root / relative).mkdir(parents=True, exist_ok=True)
+    if bootstrap:
+        atomic_write_text(workspace_root / "reference" / "WORKSPACE_BOOTSTRAP.json", _json_pretty(bootstrap))
     worklog = workspace_root / "WORKLOG.md"
     if not worklog.exists():
         atomic_write_text(worklog, "# WORKLOG\n\nUse this file for local scratch notes when useful.\n")
@@ -101,11 +108,12 @@ def prepare_semantic_workspace(
         readable_roots=[str(workspace_root), str(runtime_env.root)],
         writable_roots=[str(workspace_root)],
         network_policy=network_policy,
+        workspace_seed=(bootstrap or {}).get("workspace_seed") or {},
+        checked_out_tools=(bootstrap or {}).get("checked_out_tools") or [],
     )
 
 
 def build_semantic_startup_prompt(*, assignment: dict, workspace: SemanticWorkspace) -> str:
-    budget = assignment.get("budget") or {}
     direction = (assignment.get("metadata") or {}).get("research_direction") or {}
     direction_text = ""
     if direction:
@@ -114,6 +122,7 @@ def build_semantic_startup_prompt(*, assignment: dict, workspace: SemanticWorksp
             f"Direction id: {direction.get('direction_id')}\n"
             f"Direction note: {direction.get('startup_note') or ''}\n"
         )
+    bootstrap_text = _workspace_bootstrap_text(workspace)
     network_policy = workspace.network_policy.get("policy") if isinstance(workspace.network_policy, dict) else {}
     network_enforcement = workspace.network_policy.get("enforcement") if isinstance(workspace.network_policy, dict) else {}
     return f"""You are a Coding Agent worker in an autonomous optimization experiment.
@@ -123,6 +132,7 @@ Experiment: {assignment['experiment_id']}
 Assignment: {assignment['assignment_id']}
 Workspace: {workspace.root}
 {direction_text}
+{bootstrap_text}
 
 The server owns experiments, assignments, artifacts, jobs, evaluation, findings,
 notebook checkpoints, and policy. You own the autonomous research behavior inside
@@ -164,12 +174,14 @@ Use semantic server tools:
 - telemetry start --provider local --name <run-name>
 - telemetry log-metrics <telemetry-id> --metric loss=0.1 --step 1
 - telemetry finish <telemetry-id>
+- ctx stop --reason <why>  # record why this session has no useful next action
 
 These are capabilities, not a fixed workflow. Read context, implement, validate,
 evaluate, checkpoint, share findings, or launch jobs when evidence makes that
 action useful. Official scores must come from eval submit/server evaluation.
+If the current session has no useful next action, record useful state and run
+`ctx stop --reason <why>`.
 
-This assignment budget is: {budget}
 Network policy: {network_policy}
 Network enforcement: {network_enforcement}
 """
@@ -188,7 +200,38 @@ Use `knowledge` for read-only task-provided papers, notes, references, and conte
 Use `local_tools/` for draft helper tools and `tool publish` when a helper should become reusable by later workers.
 Check `network status` before any action that might need external internet. Control-plane access does not imply permission to search the public internet.
 Do not access hidden evaluator internals.
+If the current session has no useful next action, make useful state durable and run `ctx stop --reason <why>`.
 """
+
+
+def _workspace_bootstrap_text(workspace: SemanticWorkspace) -> str:
+    lines: list[str] = []
+    seed = workspace.workspace_seed or {}
+    if seed:
+        kind = seed.get("kind") or "unknown"
+        if seed.get("artifact_id"):
+            score = seed.get("score")
+            score_text = f", score={score}" if score is not None else ""
+            lines.append(
+                f"Workspace seed: {kind} artifact {seed.get('artifact_id')} is already materialized at {workspace.entry_path}{score_text}."
+            )
+        else:
+            reason = seed.get("reason")
+            reason_text = f" ({reason})" if reason else ""
+            lines.append(f"Workspace seed: {kind}{reason_text}; candidate entrypoint is {workspace.entry_path}.")
+    if workspace.checked_out_tools:
+        lines.append("Auto-checked-out shared tools:")
+        for tool in workspace.checked_out_tools:
+            lines.append(
+                f"- {tool.get('name')} ({tool.get('tool_id')}): {tool.get('destination_path')}"
+            )
+    if not lines:
+        return ""
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def _json_pretty(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
 SEMANTIC_SKILL_BODIES: dict[str, str] = {
@@ -247,11 +290,11 @@ server-visible memory for this assignment or future workers.
 Use `job create --provider local --command '<command>'` for host subprocess jobs,
 or `job create --provider local-docker --image <image> --command '<command>'`
 for Docker-backed local jobs. Use `job create --provider runpod` only when the
-assignment policy and budget allow cloud execution. Use `job status`, `job logs`,
-and `job wait` to inspect durable compute that can outlive the current
-coding-agent turn. When external internet is denied, Docker-backed local jobs
-use Docker network isolation and cannot opt into broad networking. Future
-providers should use the same job resource contract.
+assignment policy allows cloud execution. Use `job status`, `job logs`, and
+`job wait` to inspect durable compute that can outlive the current coding-agent
+turn. When external internet is denied, Docker-backed local jobs use Docker
+network isolation and cannot opt into broad networking. Future providers should
+use the same job resource contract.
 """,
     "environment-use": """
 # Environment Use

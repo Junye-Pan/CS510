@@ -14,7 +14,9 @@ from agentic_opt.control_plane.repository import ControlPlaneRepository
 
 
 DOCKER_WORKER_BACKENDS = {"docker", "docker_image", "local-docker", "local-docker-strict"}
-TERMINAL_SESSION_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+TERMINAL_SESSION_STATUSES = {"completed", "failed", "cancelled", "interrupted", "stopped", "blocked"}
+CONTINUABLE_ASSIGNMENT_STATUSES = {"completed", "stopped"}
+CONTINUABLE_STOP_REASONS = {"turn_completed", "turn_timeout"}
 
 
 @dataclass
@@ -24,6 +26,9 @@ class WorkerProcess:
     experiment_id: str
     process: subprocess.Popen[str]
     relay_process: subprocess.Popen[str] | None = None
+    api_url: str = ""
+    dry_run: bool = False
+    max_turn_wall_time_s: int | None = None
 
 
 class WorkerManager:
@@ -145,6 +150,9 @@ class WorkerManager:
                 experiment_id=assignment["experiment_id"],
                 process=process,
                 relay_process=relay_process,
+                api_url=api_url,
+                dry_run=dry_run,
+                max_turn_wall_time_s=max_turn_wall_time_s,
             )
         return self.control.update_session(
             session["session_id"],
@@ -164,20 +172,26 @@ class WorkerManager:
         )
 
     def worker_status(self, assignment_id: str) -> dict[str, Any] | None:
+        summary: dict[str, Any] | None = None
         with self._lock:
             worker = self._assignment_processes.get(assignment_id)
             if worker is None:
                 return None
             reaped = self._reap_worker_locked(assignment_id, worker)
             if reaped is not None:
-                return reaped
-            return {
-                "assignment_id": worker.assignment_id,
-                "session_id": worker.session_id,
-                "experiment_id": worker.experiment_id,
-                "pid": worker.process.pid,
-                "status": "running",
-            }
+                summary = reaped
+            else:
+                return {
+                    "assignment_id": worker.assignment_id,
+                    "session_id": worker.session_id,
+                    "experiment_id": worker.experiment_id,
+                    "pid": worker.process.pid,
+                    "status": "running",
+                }
+        continuation = self._maybe_continue_assignment(summary)
+        if continuation is not None:
+            summary["continuation"] = continuation
+        return summary
 
     def reap_finished_processes(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -186,7 +200,11 @@ class WorkerManager:
                 summary = self._reap_worker_locked(assignment_id, worker)
                 if summary is not None:
                     reaped.append(summary)
-            return reaped
+        for summary in reaped:
+            continuation = self._maybe_continue_assignment(summary)
+            if continuation is not None:
+                summary["continuation"] = continuation
+        return reaped
 
     def close(self) -> None:
         self._reaper_stop.set()
@@ -219,6 +237,107 @@ class WorkerManager:
             "pid": worker.process.pid,
             "status": "finished",
             "returncode": returncode,
+            "api_url": worker.api_url,
+            "dry_run": worker.dry_run,
+            "max_turn_wall_time_s": worker.max_turn_wall_time_s,
+        }
+
+    def _maybe_continue_assignment(self, summary: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not summary or summary.get("returncode") != 0:
+            return None
+        assignment_id = str(summary["assignment_id"])
+        assignment = self.control.get_assignment(assignment_id)
+        session = self.control.get_session(str(summary["session_id"]))
+        if assignment is None or session is None:
+            return None
+        if assignment.get("status") not in CONTINUABLE_ASSIGNMENT_STATUSES:
+            return None
+        session_details = session.get("details") or {}
+        if session_details.get("stop_reason") not in CONTINUABLE_STOP_REASONS:
+            return None
+        metadata = assignment.get("metadata") or {}
+        if metadata.get("global_stop_condition") or metadata.get("stop_condition") or metadata.get("auto_continue_disabled"):
+            return None
+
+        budget_state = self._evaluator_budget_state(assignment)
+        if not budget_state["has_budget"]:
+            return None
+        if int(budget_state["remaining"]) <= 0:
+            self.control.update_assignment_status(
+                assignment_id,
+                "completed",
+                metadata={
+                    "budget_exhausted": {
+                        "source": "worker_reaper",
+                        **budget_state,
+                    }
+                },
+            )
+            self.control.record_event(
+                {
+                    "experiment_id": assignment["experiment_id"],
+                    "assignment_id": assignment_id,
+                    "session_id": session["session_id"],
+                    "task_id": assignment["task_id"],
+                    "agent_id": assignment["agent_id"],
+                    "event_type": "assignment.budget_exhausted",
+                    "summary": "assignment evaluator budget exhausted",
+                    "payload": budget_state,
+                }
+            )
+            return None
+
+        self.control.update_experiment_status(
+            assignment["experiment_id"],
+            "running",
+            metadata={
+                "auto_continue": {
+                    "source": "worker_reaper",
+                    "assignment_id": assignment_id,
+                    "previous_session_id": session["session_id"],
+                    "budget": budget_state,
+                }
+            },
+        )
+        self.control.record_event(
+            {
+                "experiment_id": assignment["experiment_id"],
+                "assignment_id": assignment_id,
+                "session_id": session["session_id"],
+                "task_id": assignment["task_id"],
+                "agent_id": assignment["agent_id"],
+                "event_type": "assignment.auto_continue",
+                "summary": "worker completed before evaluator budget was exhausted; starting another session",
+                "payload": budget_state,
+            }
+        )
+        return self.start_control_assignment(
+            assignment_id=assignment_id,
+            api_url=str(summary.get("api_url") or (session_details.get("api_url") or "")),
+            dry_run=bool(summary.get("dry_run")),
+            max_turn_wall_time_s=summary.get("max_turn_wall_time_s"),
+        )
+
+    def _evaluator_budget_state(self, assignment: dict[str, Any]) -> dict[str, Any]:
+        experiment = self.control.get_experiment(assignment["experiment_id"])
+        assignment_limit = _positive_int((assignment.get("budget") or {}).get("evaluator_runs"))
+        experiment_budget = (experiment or {}).get("budget") or {}
+        experiment_limit = _positive_int(experiment_budget.get("total_evaluator_runs") or experiment_budget.get("evaluator_runs"))
+        assignment_used = _count_evaluator_runs(self.control.list_evaluations(assignment_id=assignment["assignment_id"]))
+        experiment_used = _count_evaluator_runs(self.control.list_evaluations(experiment_id=assignment["experiment_id"]))
+        remaining_values: list[int] = []
+        if assignment_limit is not None:
+            remaining_values.append(assignment_limit - assignment_used)
+        if experiment_limit is not None:
+            remaining_values.append(experiment_limit - experiment_used)
+        remaining = min(remaining_values) if remaining_values else 0
+        return {
+            "has_budget": bool(remaining_values),
+            "remaining": max(0, remaining),
+            "assignment_limit": assignment_limit,
+            "assignment_used": assignment_used,
+            "experiment_limit": experiment_limit,
+            "experiment_used": experiment_used,
         }
 
     def _finalize_session_if_needed(self, worker: WorkerProcess, returncode: int) -> None:
@@ -243,6 +362,20 @@ class WorkerManager:
                 "details": details,
             },
         )
+
+
+def _count_evaluator_runs(evaluations: list[dict[str, Any]]) -> int:
+    return sum(1 for item in evaluations if item.get("status") != "cancelled")
+
+
+def _positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _needs_docker_control_plane_relay(*, assignment: dict[str, Any], experiment: dict[str, Any] | None) -> bool:
@@ -288,5 +421,6 @@ def _terminate_process(process: subprocess.Popen[str] | None) -> None:
 def _worker_process_env(repo_root: Path) -> dict[str, str]:
     env = build_subprocess_env()
     repo_src = str(repo_root / "src")
-    env["PYTHONPATH"] = repo_src if not env.get("PYTHONPATH") else f"{repo_src}:{env['PYTHONPATH']}"
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = repo_src if not existing_pythonpath else repo_src + ":" + existing_pythonpath
     return env

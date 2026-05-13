@@ -57,6 +57,13 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
     runtime_env = _runtime_env_from_environment(environment)
+    bootstrap = client.post(
+        f"/api/v1/assignments/{assignment['assignment_id']}/workspace-bootstrap",
+        {
+            "workspace_root": str(args.workspace_root),
+            "session_id": args.session_id,
+        },
+    )
     workspace = prepare_semantic_workspace(
         workspace_root=args.workspace_root,
         api_url=args.api_url,
@@ -64,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         session_id=args.session_id,
         runtime_env=runtime_env,
         network_policy=network_policy,
+        bootstrap=bootstrap,
     )
     client.patch(
         f"/api/v1/sessions/{args.session_id}",
@@ -74,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
                 "entry_path": str(workspace.entry_path),
                 "mode": "dry-run" if args.dry_run else assignment.get("worker_backend") or "codex-local",
                 "network_policy": network_policy,
+                "workspace_seed": bootstrap.get("workspace_seed"),
+                "checked_out_tools": bootstrap.get("checked_out_tools") or [],
             },
         },
     )
@@ -87,7 +97,12 @@ def main(argv: list[str] | None = None) -> int:
             "agent_id": assignment["agent_id"],
             "event_type": "worker.workspace.prepared",
             "summary": "semantic workspace prepared",
-            "payload": {"workspace_root": str(workspace.root), "entry_path": str(workspace.entry_path)},
+            "payload": {
+                "workspace_root": str(workspace.root),
+                "entry_path": str(workspace.entry_path),
+                "workspace_seed": bootstrap.get("workspace_seed"),
+                "checked_out_tools": bootstrap.get("checked_out_tools") or [],
+            },
         },
     )
     if ((network_policy.get("enforcement") or {}).get("policy_weakened")):
@@ -123,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     adapter = AppServerCodexAdapter(
         client=app_client,
-        config=AppServerAdapterConfig(codex_binary=args.codex_binary, reasoning_effort="high"),
+        config=AppServerAdapterConfig(codex_binary=args.codex_binary, model="gpt-5.5", reasoning_effort="xhigh"),
     )
     run_id = make_run_id(assignment["agent_id"])
     final_status = "completed"

@@ -88,6 +88,15 @@ The following are fixed before the first agent session:
 - baseline: unoptimized framework run in the same pinned environment;
 - prompts, sequence lengths, generation lengths, seeds, and sampling parameters.
 
+The current concrete model source is the Hugging Face repository
+`Qwen/Qwen3.5-4B`. The downloaded local copy and its manifest should live under
+`CS510/runs/models/`, for example:
+
+```text
+CS510/runs/models/Qwen--Qwen3.5-4B/
+CS510/runs/models/qwen35_4b_manifest.json
+```
+
 Agents may not change:
 
 - model weights;
@@ -322,26 +331,56 @@ Workload families:
 Official evaluation must rerun verifier first. If verifier fails, score is
 zero and no end-to-end evaluation runs.
 
-If verifier passes:
+The small `qwen35_4b_vllm_integrated_smoke_v1` workload is only a probe/smoke
+path. It is used to confirm model loading, vLLM plugin installation,
+candidate-call visibility, and basic deterministic output matching. It should
+not determine the official leaderboard score.
 
-1. load the pinned baseline environment;
-2. load the candidate artifact snapshot;
-3. build the verified implementation pool;
-4. enable official apply runtime;
-5. run hidden workload;
-6. record correctness, speed, memory, dispatch, and fallback metrics;
-7. compute final speedup score;
-8. publish a leaderboard entry only if the result is valid.
+Current implemented RMSNorm MVP scoring uses a separate Qwen/vLLM serving-style
+evaluation suite named
+`qwen35_4b_vllm_prefill_decode_mixed_serving_sweeps_v2`. If verifier passes:
 
-Suggested score:
+1. run static candidate verification;
+2. run H200 live RMSNorm correctness and microbenchmark diagnostics;
+3. load the pinned logits-distribution and evaluation-suite baseline artifacts from
+   `CS510/runs/baselines/`;
+4. build the verified implementation pool;
+5. install the candidate through the vLLM `vllm.general_plugins` apply path;
+6. run the Qwen/vLLM full-logprob distribution probe on fixed baseline-selected
+   positions covering prefill logits, decode logits, low-margin positions, and
+   a long-context decode case;
+7. compare KL(P||P'), total variation, shift-invariant centered-logit L2/Linf,
+   selected token identity, and argmax identity against the pinned baseline;
+8. run the Qwen/vLLM prefill/decode/mixed batch/concurrency sweeps;
+9. compare suite identity, per-family request identity, generated token ids,
+   and generated text against the pinned baseline;
+10. enforce candidate-call and fallback-policy thresholds;
+11. compute one speedup per family as
+   `baseline_family_p90_request_latency_s / candidate_family_p90_request_latency_s`;
+12. compute final score as the geometric mean of:
+   - prefill family speedup;
+   - decode family speedup;
+   - mixed family speedup;
+13. publish a leaderboard entry only if the result is valid.
 
-```text
-score = geomean(
-  prefill_heavy_ttft_speedup,
-  decode_heavy_tpot_speedup,
-  mixed_chat_latency_or_throughput_speedup
-)
-```
+Model load time, TTFT proxy, TPOT proxy, throughput, and hidden RMSNorm
+microbenchmark geomean speedup are diagnostics. They do not directly determine
+the official optimized-candidate score.
+
+The implemented evaluation families are:
+
+- `prefill`: long deterministic prompts with short generation, measuring
+  prompt ingestion and first-token path pressure;
+- `decode`: short prompts with longer generation, measuring sustained decode
+  path pressure;
+- `mixed`: varied prompt lengths with medium generation, measuring a
+  chat-like latency mix.
+
+This mirrors the FlashInfer-Bench separation between a concrete workload
+definition and measured evaluation traces: the suite binds fixed prompts,
+generation lengths, sampling parameters, sweep concurrency, and correctness
+outputs, then records p50/p90 request latency, TTFT proxy, TPOT proxy,
+throughput, and per-family speedup.
 
 Invalid conditions:
 
@@ -422,6 +461,12 @@ Recommended environment policy:
 - model and tokenizer mounts are read-only;
 - candidate artifact is the only mutable input to official evaluation.
 
+All experiment data, including model download manifests, smoke-test outputs,
+control-plane smoke databases, candidate snapshots, verifier summaries, and
+benchmark summaries, should be written under `CS510/runs/`. Task code should not
+write smoke outputs to `/tmp` or ad-hoc locations outside the repository run
+root.
+
 ## Initial Implementation Plan
 
 1. Add task skeleton with directory candidate contract.
@@ -434,6 +479,224 @@ Recommended environment policy:
 8. Add hidden workloads and final speedup scoring.
 9. Add low-precision and stochastic verifier classes.
 10. Move official evaluation to `docker_image` when the provider is ready.
+
+## Concrete Build Plan From Current Repository
+
+The first implementation should be an MVP task that can be loaded and statically
+verified in the normal development environment, while full model execution stays
+gated behind the prepared H200 runtime. This keeps ordinary source editing and
+unit tests independent of heavyweight `torch`, `triton`, `vllm`, and local model
+installations.
+
+Repository integration:
+
+- create `tasks/llm_inference_qwen35_4b_h200/`;
+- expose `LLMInferenceQwen35B4H200Task` from `task.py`;
+- declare `CandidateSpec(candidate_root="candidate",
+  public_seed_root="initial_candidate", entrypoint_name="manifest.json")`;
+- keep import-time dependencies limited to the standard library and
+  `agentic_opt`;
+- place public contract, public definitions, and the seed candidate under
+  `public/`;
+- place verifier, schema, workload, scoring, preflight, and apply-runtime code
+  under `private/`.
+
+MVP file layout:
+
+```text
+tasks/llm_inference_qwen35_4b_h200/
+  __init__.py
+  task.py
+  public/
+    TASK.md
+    public_contract.md
+    definitions/qwen_rmsnorm_h2560_fp16.json
+    workloads/public_rmsnorm_shapes.json
+    initial_candidate/
+      manifest.json
+      kernels/rmsnorm.py
+  private/
+    __init__.py
+    schema.py
+    verifier.py
+    definitions.py
+    workloads.py
+    scoring.py
+    preflight.py
+    apply_runtime.py
+    vllm_plugin_runtime.py
+    vllm_rmsnorm_plugin.py
+    qwen_vllm_smoke.py
+```
+
+MVP behavior:
+
+- `verify_entry()` always runs static bundle validation;
+- the empty/baseline seed candidate is valid and reports baseline fallback
+  coverage;
+- candidate source paths must be relative, must stay under the candidate root,
+  and must not contain `..` or absolute paths;
+- each implementation must target the pinned model/framework/GPU/dtype and an
+  existing task definition;
+- RMSNorm is the first public deterministic kernel definition:
+  `qwen_rmsnorm_h2560_fp16`;
+- GPU correctness/build checks are skipped unless the H200 live verifier is
+  explicitly enabled;
+- `probe_entry()` returns public aggregate diagnostics only;
+- `evaluate_entry()` reruns verifier and, until the live H200 path is enabled,
+  returns a baseline score of `1.0` for a valid baseline-only candidate and a
+  clear `official_live_enabled=false` metric.
+
+Current vLLM RMSNorm apply path:
+
+- Qwen/vLLM smoke can receive the verified candidate manifest path from
+  `evaluate_entry()`;
+- the smoke creates a local `vllm.general_plugins` entry point under the active
+  run directory in `CS510/runs/`;
+- vLLM engine and worker processes load that plugin through vLLM's normal
+  general-plugin mechanism;
+- the plugin patches vLLM `RMSNorm` and `GemmaRMSNorm` forward paths before
+  model layers are instantiated;
+- Qwen 3.5 uses `GemmaRMSNorm`, so the adapter passes `1 + weight` to the
+  candidate implementation to preserve Qwen's official norm semantics;
+- only `[*, 2560]` CUDA FP16/BF16 tensors covered by the candidate shape guard
+  dispatch to the candidate kernel; unsupported head-dim norms fall back to
+  vLLM;
+- smoke output records `candidate_rmsnorm_used_in_vllm`, candidate call counts,
+  shapes, process ids, and fallback reasons in
+  `vllm_rmsnorm_apply_trace.jsonl` under the run directory;
+- when model smoke is required, `evaluate_entry()` treats missing candidate
+  calls as a failed integrated smoke.
+
+Current implementation status as of 2026-05-12:
+
+- the concrete task package exists at
+  `tasks/llm_inference_qwen35_4b_h200/`;
+- the public candidate contract is directory-based and uses
+  `candidate/manifest.json`;
+- the public seed candidate is an empty baseline bundle;
+- the public example candidate provides a Triton RMSNorm implementation for
+  `qwen_rmsnorm_h2560_fp16`;
+- the verifier supports static manifest checks, source path validation, target
+  checks, forbidden model/tokenizer artifact rejection, and optional H200 live
+  RMSNorm correctness checks;
+- Qwen 3.5 4B has been downloaded from `Qwen/Qwen3.5-4B` into
+  `CS510/runs/models/Qwen--Qwen3.5-4B/`;
+- the model manifest is recorded at
+  `CS510/runs/models/qwen35_4b_manifest.json`;
+- the pinned model revision used for this smoke is
+  `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`;
+- the current H200 runtime uses the existing
+  `/home/junyep2/local/envs/swestar-vllm/bin/python` environment with
+  Torch/Triton/vLLM installed;
+- the pinned integrated-smoke baseline artifact is recorded at
+  `CS510/runs/baselines/qwen35_4b_vllm_smoke_baseline.json`;
+- the pinned evaluation-suite baseline artifact is expected at
+  `CS510/runs/baselines/qwen35_4b_vllm_eval_suite_baseline.json`;
+- integrated correctness compares candidate Qwen/vLLM outputs against the
+  pinned evaluation suite, per-family request identities, generated token ids,
+  and generated text;
+- official fallback policy requires at least one candidate call and a fallback
+  rate no higher than `0.50` by default;
+- official optimized-candidate score is now the geometric mean of prefill,
+  decode, and mixed Qwen/vLLM family speedups;
+- RMSNorm hidden-shape geomean speedup is still recorded as a diagnostic;
+- `eval probe` exposes aggregate dispatch, fallback, latency-delta, policy, and
+  bottleneck-hint diagnostics, with opt-in integrated model probing through
+  `AO_LLM_KERNEL_PROBE_MODEL_SMOKE=1`;
+- all download, smoke, verifier, benchmark, control-plane, candidate snapshot,
+  and trace outputs are written under `CS510/runs/`.
+
+Latest integrated smoke evidence:
+
+- baseline Qwen/vLLM smoke completed at
+  `CS510/runs/qwen_vllm_smoke_20260512T103106Z/`;
+- official control-plane `submit` path with baseline correctness and fallback
+  policy completed at
+  `CS510/runs/control_plane_policy_correctness_20260512T103352Z/`;
+- that control-plane run produced evaluation
+  `eval_20260512_103355_55c23ed7` and candidate artifact
+  `artifact_20260512_103355_819b0808`;
+- after switching to end-to-end scoring, a live `evaluate_entry()` check
+  completed at `CS510/runs/llm_kernel_evaluate_20260512T174307Z/`;
+- that check wrote the direct summary at
+  `CS510/runs/direct_end2end_score_file_20260512T174258Z/direct_evaluate_summary.json`;
+- the official score component was `generate_elapsed_speedup`;
+- baseline generate elapsed was `13.791041135787964s`, candidate generate
+  elapsed was `9.676185131072998s`, and the resulting score was
+  `1.4252560227998312`;
+- RMSNorm microbenchmark diagnostic speedup for that same check was
+  `6.846887702134944`;
+- the smoke required candidate RMSNorm use and reported
+  `candidate_rmsnorm_used_in_vllm=true`;
+- vLLM trace recorded `780` candidate calls through `GemmaRMSNorm`;
+- fallback policy recorded `384` fallback calls and fallback rate
+  `0.32989690721649484`, which is below the default `0.50` threshold;
+- integrated correctness recorded token match rate `1.0` and minimum
+  top-logprob overlap `0.8` against the pinned baseline;
+- observed candidate shapes included `[1, 2560]`, `[2, 2560]`, `[9, 2560]`,
+  `[12, 2560]`, `[1024, 2560]`, and `[16384, 2560]`;
+- before the end-to-end score switch, that run reported RMSNorm microbenchmark
+  geomean speedup `6.777929507002357`.
+
+Latest evaluation-suite baseline evidence:
+
+- baseline Qwen/vLLM prefill/decode/mixed suite completed at
+  `CS510/runs/qwen_vllm_eval_suite_20260512T182326Z/`;
+- pinned evaluation-suite baseline artifact was written to
+  `CS510/runs/baselines/qwen35_4b_vllm_eval_suite_baseline.json`;
+- baseline self-score summary was written to
+  `CS510/runs/qwen_vllm_eval_suite_20260512T182326Z/baseline_self_score.json`;
+- baseline family timings were:
+  - prefill: `0.8334658145904541s` for `2748` input tokens and `16` output
+    tokens;
+  - decode: `1.0406031608581543s` for `22` input tokens and `128` output
+    tokens;
+  - mixed: `0.5589745044708252s` for `891` input tokens and `128` output
+    tokens;
+- that baseline was for the previous compact suite and must be regenerated for
+  serving-sweep suite v2 before the next live optimized-candidate submit;
+- a live example RMSNorm candidate evaluation reached the new suite path at
+  `CS510/runs/llm_kernel_evaluate_20260512T182550Z/`, invoked the candidate
+  through vLLM, and passed fallback policy, but was invalidated by deterministic
+  decode/mixed output drift against the pinned suite baseline.
+
+Current scoring caveat: serving-sweep suite v2 is still executed through the
+local vLLM Python runtime rather than a containerized H200 provider.
+
+Environment split:
+
+- normal development and CI use CPU-only static tests;
+- live GPU verification is enabled only when an operator sets an explicit flag
+  such as `AO_LLM_KERNEL_ENABLE_LIVE=1`;
+- live preflight checks the H200 device, pinned model path, tokenizer revision,
+  `torch`, `triton`, `vllm`, CUDA/driver versions, and baseline metrics;
+- full official scoring should not run unless that preflight passes.
+
+FlashInfer-Bench mapping:
+
+- mirror `Definition` for axes, input/output tensor specs, constraints, and
+  reference behavior;
+- mirror `Solution` for source files, language, binding, entry point, and build
+  metadata;
+- mirror `Workload` for generated/public/probe/hidden shapes;
+- mirror deterministic evaluator semantics for shape, dtype, finite, and
+  elementwise tolerance checks;
+- mirror sampling evaluator semantics later for valid masks and total variation
+  distance;
+- adapt `ApplyRuntime`/`ApplyTable` dispatch from definition+axes to
+  definition+phase+dtype+shape bucket+LLM runtime features.
+
+Testing plan:
+
+- task registry can load the new task;
+- task contract exposes the directory candidate metadata;
+- public seed candidate verifies successfully without GPU packages;
+- malformed manifests fail closed with useful public feedback;
+- path traversal, absolute source paths, duplicate implementation ids, unknown
+  definitions, unsupported languages, and target mismatches are rejected;
+- baseline score math and geomean scoring are covered by unit tests;
+- H200/vLLM smoke tests are isolated behind an opt-in environment variable.
 
 ## Minimal MVP Scope
 
