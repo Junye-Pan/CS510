@@ -29,9 +29,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
     @app.get("/api/v1/tasks/<task_id>")
     def control_task(task_id: str):
         try:
-            payload = task_contract(task_id)
-            payload["knowledge_items"] = ctx.control_service.list_knowledge_items(task_id=task_id)
-            return jsonify(payload)
+            return jsonify(task_contract(task_id))
         except Exception as exc:
             return _error(exc, 404)
 
@@ -66,6 +64,9 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 "experiment": experiment,
                 "assignments": ctx.control.list_assignments(experiment_id=experiment_id),
                 "sessions": ctx.control.list_sessions(experiment_id=experiment_id),
+                "attempts": ctx.control.list_attempts(experiment_id=experiment_id),
+                "agent_traces": ctx.control.list_agent_traces(experiment_id=experiment_id),
+                "trace_exports": ctx.control.list_trace_export_runs(experiment_id=experiment_id),
                 "jobs": ctx.control.list_jobs(experiment_id=experiment_id),
                 "environments": ctx.control.list_environments(experiment_id=experiment_id)
                 or ctx.control.list_environments(task_id=experiment["task_id"]),
@@ -76,13 +77,21 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 "telemetry_runs": ctx.control.list_telemetry_runs(experiment_id=experiment_id),
                 "artifacts": ctx.control.list_artifacts(experiment_id=experiment_id),
                 "shared_tools": ctx.control.list_shared_tools(task_id=experiment["task_id"], experiment_id=experiment_id),
-                "knowledge_items": ctx.control_service.list_knowledge_items(task_id=experiment["task_id"]),
+                "task_knowledge": ctx.control_service.task_knowledge_inventory(task_id=experiment["task_id"]),
                 "network_policy": ctx.control_service.network_policy({"experiment_id": experiment_id}),
                 "network_access_events": ctx.control.list_network_access_events(experiment_id=experiment_id, limit=100),
                 "findings": ctx.control.list_findings(experiment_id=experiment_id),
                 "events": ctx.control.list_events(experiment_id=experiment_id, limit=100),
             }
         )
+
+    @app.get("/api/v1/experiments/<experiment_id>/analysis")
+    def control_get_experiment_analysis(experiment_id: str):
+        try:
+            limit = int(request.args.get("leaderboard_limit") or 500)
+            return jsonify(ctx.control_service.run_analysis(experiment_id, leaderboard_limit=limit))
+        except Exception as exc:
+            return _error(exc, 404)
 
     @app.patch("/api/v1/experiments/<experiment_id>")
     def control_update_experiment(experiment_id: str):
@@ -212,6 +221,13 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
             return jsonify({"error": "environment not found"}), 404
         return jsonify(environment)
 
+    @app.post("/api/v1/environments/<environment_id>/export-bundle")
+    def control_export_environment_bundle(environment_id: str):
+        try:
+            return jsonify(ctx.control_service.export_environment_bundle(environment_id, _payload())), 201
+        except Exception as exc:
+            return _error(exc, 404)
+
     @app.post("/api/v1/environment-overlays")
     def control_create_environment_overlay():
         try:
@@ -246,6 +262,146 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
         except Exception as exc:
             return _error(exc, 404)
 
+    @app.post("/api/v1/attempts")
+    def control_create_attempt():
+        try:
+            return jsonify(ctx.control_service.create_attempt(_payload())), 201
+        except Exception as exc:
+            return _error(exc)
+
+    @app.get("/api/v1/attempts")
+    def control_list_attempts():
+        return jsonify(
+            {
+                "attempts": ctx.control.list_attempts(
+                    experiment_id=request.args.get("experiment_id"),
+                    assignment_id=request.args.get("assignment_id"),
+                    session_id=request.args.get("session_id"),
+                    task_id=request.args.get("task_id"),
+                    parent_attempt_id=request.args.get("parent_attempt_id"),
+                    status=request.args.get("status"),
+                )
+            }
+        )
+
+    @app.get("/api/v1/attempts/<attempt_id>")
+    def control_get_attempt(attempt_id: str):
+        try:
+            return jsonify(ctx.control_service.attempt_context(attempt_id))
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.patch("/api/v1/attempts/<attempt_id>")
+    def control_update_attempt(attempt_id: str):
+        try:
+            return jsonify(ctx.control_service.update_attempt(attempt_id, _payload()))
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.get("/api/v1/agent-traces")
+    def control_list_agent_traces():
+        return jsonify(
+            {
+                "agent_traces": ctx.control_service.list_agent_traces(
+                    experiment_id=request.args.get("experiment_id"),
+                    assignment_id=request.args.get("assignment_id"),
+                    session_id=request.args.get("session_id"),
+                    task_id=request.args.get("task_id"),
+                    agent_id=request.args.get("agent_id"),
+                    status=request.args.get("status"),
+                    attempt_id=request.args.get("attempt_id"),
+                )
+            }
+        )
+
+    @app.post("/api/v1/agent-traces")
+    def control_register_agent_trace():
+        try:
+            return jsonify(ctx.control_service.register_agent_trace(_payload())), 201
+        except Exception as exc:
+            return _error(exc)
+
+    @app.get("/api/v1/agent-traces/search")
+    def control_search_agent_traces():
+        try:
+            return jsonify(
+                ctx.control_service.search_agent_traces(
+                    query=request.args.get("q") or request.args.get("query") or "",
+                    experiment_id=request.args.get("experiment_id"),
+                    assignment_id=request.args.get("assignment_id"),
+                    session_id=request.args.get("session_id"),
+                    task_id=request.args.get("task_id"),
+                    agent_id=request.args.get("agent_id"),
+                    status=request.args.get("status"),
+                    attempt_id=request.args.get("attempt_id"),
+                )
+            )
+        except Exception as exc:
+            return _error(exc)
+
+    @app.get("/api/v1/agent-traces/<trace_id>")
+    def control_get_agent_trace(trace_id: str):
+        try:
+            return jsonify(ctx.control_service.agent_trace_context(trace_id))
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.get("/api/v1/agent-traces/<trace_id>/commands")
+    def control_agent_trace_commands(trace_id: str):
+        try:
+            return jsonify(
+                ctx.control_service.agent_trace_commands(
+                    trace_id,
+                    failed_only=request.args.get("failed_only") in {"1", "true", "yes"},
+                    semantic_only=request.args.get("semantic_only") in {"1", "true", "yes"},
+                )
+            )
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.get("/api/v1/agent-traces/<trace_id>/events")
+    def control_agent_trace_events(trace_id: str):
+        try:
+            return jsonify(
+                ctx.control_service.agent_trace_events(
+                    trace_id,
+                    query=request.args.get("q") or request.args.get("query"),
+                    limit=int(request.args.get("limit") or 200),
+                )
+            )
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.post("/api/v1/trace-exports")
+    def control_create_trace_export():
+        try:
+            return jsonify(ctx.control_service.create_trace_export(_payload())), 201
+        except Exception as exc:
+            return _error(exc)
+
+    @app.get("/api/v1/trace-exports")
+    def control_list_trace_exports():
+        return jsonify(
+            {
+                "trace_exports": ctx.control_service.list_trace_exports(
+                    experiment_id=request.args.get("experiment_id"),
+                    assignment_id=request.args.get("assignment_id"),
+                    session_id=request.args.get("session_id"),
+                    task_id=request.args.get("task_id"),
+                    agent_id=request.args.get("agent_id"),
+                    provider=request.args.get("provider"),
+                    status=request.args.get("status"),
+                )
+            }
+        )
+
+    @app.get("/api/v1/trace-exports/<trace_export_id>")
+    def control_get_trace_export(trace_export_id: str):
+        try:
+            return jsonify(ctx.control_service.get_trace_export(trace_export_id))
+        except Exception as exc:
+            return _error(exc, 404)
+
     @app.post("/api/v1/artifacts")
     def control_create_artifact():
         try:
@@ -263,6 +419,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 "artifacts": ctx.control.list_artifacts(
                     experiment_id=request.args.get("experiment_id"),
                     assignment_id=request.args.get("assignment_id"),
+                    attempt_id=request.args.get("attempt_id"),
                 )
             }
         )
@@ -308,30 +465,6 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
         except Exception as exc:
             return _error(exc, 404)
 
-    @app.get("/api/v1/knowledge")
-    def control_list_knowledge():
-        task_id = request.args.get("task_id")
-        if not task_id:
-            return jsonify({"error": "task_id is required"}), 400
-        try:
-            return jsonify({"knowledge_items": ctx.control_service.list_knowledge_items(task_id=task_id, query=request.args.get("query"))})
-        except Exception as exc:
-            return _error(exc, 404)
-
-    @app.get("/api/v1/knowledge/<knowledge_id>")
-    def control_get_knowledge(knowledge_id: str):
-        item = ctx.control_service.get_knowledge_item(knowledge_id)
-        if item is None:
-            return jsonify({"error": "knowledge item not found"}), 404
-        return jsonify(item)
-
-    @app.post("/api/v1/knowledge/<knowledge_id>/materialize")
-    def control_materialize_knowledge(knowledge_id: str):
-        try:
-            return jsonify(ctx.control_service.materialize_knowledge_item(knowledge_id, _payload()))
-        except Exception as exc:
-            return _error(exc, 404)
-
     @app.post("/api/v1/evaluations")
     def control_create_evaluation():
         try:
@@ -347,6 +480,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 "evaluations": ctx.control.list_evaluations(
                     experiment_id=request.args.get("experiment_id"),
                     assignment_id=request.args.get("assignment_id"),
+                    attempt_id=request.args.get("attempt_id"),
                 )
             }
         )
@@ -362,6 +496,22 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
             except Exception:
                 pass
         return jsonify(evaluation)
+
+    @app.post("/api/v1/evaluations/<evaluation_id>/replay-bundle")
+    def control_export_replay_bundle(evaluation_id: str):
+        try:
+            return jsonify(ctx.control_service.export_replay_bundle(evaluation_id, _payload())), 201
+        except Exception as exc:
+            return _error(exc, 404)
+
+    @app.post("/api/v1/replay")
+    def control_replay_bundle():
+        try:
+            result = ctx.control_service.replay_bundle(_payload())
+            evaluation = result["evaluation"]
+            return jsonify(result), 202 if evaluation["status"] in {"queued", "running"} else 201
+        except Exception as exc:
+            return _error(exc)
 
     @app.get("/api/v1/leaderboard")
     def control_list_leaderboard():
@@ -409,6 +559,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                     experiment_id=request.args.get("experiment_id"),
                     assignment_id=request.args.get("assignment_id"),
                     job_id=request.args.get("job_id"),
+                    attempt_id=request.args.get("attempt_id"),
                 )
             }
         )
@@ -449,6 +600,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 "jobs": ctx.control.list_jobs(
                     experiment_id=request.args.get("experiment_id"),
                     assignment_id=request.args.get("assignment_id"),
+                    attempt_id=request.args.get("attempt_id"),
                 )
             }
         )
@@ -467,6 +619,15 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
             return jsonify(ctx.control_service.jobs.read_logs(job_id, max_bytes=max_bytes))
         except Exception as exc:
             return _error(exc, 404)
+
+    @app.post("/api/v1/jobs/<job_id>/attach")
+    def control_attach_job(job_id: str):
+        try:
+            return jsonify(ctx.control_service.jobs.attach(job_id, _payload()))
+        except KeyError as exc:
+            return _error(exc, 404)
+        except Exception as exc:
+            return _error(exc)
 
     @app.post("/api/v1/jobs/<job_id>/cancel")
     def control_cancel_job(job_id: str):

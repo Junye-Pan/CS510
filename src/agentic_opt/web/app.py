@@ -9,6 +9,7 @@ from agentic_opt.control_plane.repository import ControlPlaneRepository
 from agentic_opt.control_plane.service import ControlPlaneService
 
 from .routes_control_plane import register_control_plane_routes
+from .routes_ui import register_ui_routes
 from .workers import WorkerManager
 
 
@@ -21,7 +22,7 @@ class WebContext:
     workers: WorkerManager
 
 
-def create_app(*, state_root: Path, database_path: Path):
+def create_app(*, state_root: Path, database_path: Path, default_api_url: str | None = None):
     try:
         from flask import Flask, jsonify
     except ImportError as exc:  # pragma: no cover - import depends on environment
@@ -42,6 +43,7 @@ def create_app(*, state_root: Path, database_path: Path):
         repo_root=repo_root,
         state_root=state_root,
         control=control,
+        default_api_url=default_api_url,
     )
     ctx = WebContext(
         state_root=state_root,
@@ -81,6 +83,7 @@ def create_app(*, state_root: Path, database_path: Path):
             return jsonify({"ok": False, "service": "control-plane", "error": str(exc)}), 503
 
     register_control_plane_routes(app, ctx)
+    register_ui_routes(app, ctx)
     return app
 
 
@@ -102,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     app = create_app(
         state_root=state_root,
         database_path=db_path,
+        default_api_url=f"http://{args.host}:{args.port}",
     )
     app.run(host=args.host, port=args.port, debug=args.debug)
     return 0

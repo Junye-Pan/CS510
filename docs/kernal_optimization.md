@@ -424,7 +424,8 @@ The current system already supports the main task boundary:
 - `EvaluationService` already runs `verify_entry()` before `evaluate_entry()`;
 - leaderboard/incumbent records are created only after valid official results;
 - semantic tools expose `ctx`, `artifact`, `eval`, `finding`, `notebook`,
-  `job`, `env`, `telemetry`, `tool`, `knowledge`, and `network`.
+  `job`, `env`, `telemetry`, `tool`, and `network`; task knowledge is exposed
+  as files under `task/knowledge/`.
 
 The task should implement:
 

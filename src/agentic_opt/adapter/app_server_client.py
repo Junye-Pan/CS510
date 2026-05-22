@@ -133,10 +133,21 @@ class AppServerClient:
         with self._condition:
             self._pending[request_id] = pending
         self._send({"id": request_id, "method": method, "params": params or {}})
-        if not pending.event.wait(timeout=timeout_s):
-            with self._condition:
-                self._pending.pop(request_id, None)
-            raise TimeoutError(f"Timed out waiting for App Server response to {method}")
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        while not pending.event.wait(timeout=0.1):
+            process = self._process
+            if process is not None and process.poll() is not None:
+                with self._condition:
+                    self._pending.pop(request_id, None)
+                    stderr_tail = "\n".join(self._stderr_lines[-20:])
+                message = f"codex app-server exited before response to {method} (exit={process.returncode})"
+                if stderr_tail:
+                    message = f"{message}; stderr tail:\n{stderr_tail}"
+                raise AppServerClientError(message)
+            if deadline is not None and time.monotonic() >= deadline:
+                with self._condition:
+                    self._pending.pop(request_id, None)
+                raise TimeoutError(f"Timed out waiting for App Server response to {method}")
         if pending.error is not None:
             message = pending.error.get("message", "unknown error")
             raise AppServerClientError(f"{method} failed: {message}")
@@ -237,6 +248,9 @@ class AppServerClient:
         self._merge_config_file(source_home / "config.toml", target_home / "config.toml")
 
     def _source_codex_home(self, env: dict[str, str]) -> Path | None:
+        source_value = env.get("AO_CODEX_SOURCE_HOME")
+        if source_value:
+            return Path(source_value).expanduser()
         source_value = env.get("CODEX_HOME")
         if source_value:
             return Path(source_value).expanduser()

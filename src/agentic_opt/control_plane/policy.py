@@ -74,7 +74,7 @@ class PolicyService:
                 )
 
         requires_approval = bool(payload.get("requires_approval") or job_policy.get("require_approval"))
-        if provider not in {"local", "local-docker"}:
+        if provider not in {"local", "local-docker", "local-docker-strict", "docker_image"}:
             requires_approval = bool(job_policy.get("require_provider_approval", True))
         if requires_approval and payload.get("approved"):
             return PolicyDecision(True, estimated_cost=estimated)

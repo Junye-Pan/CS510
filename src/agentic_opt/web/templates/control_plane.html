@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>agentic-opt control plane</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='control_plane_ui.css') }}">
+  </head>
+  <body>
+    <div
+      id="ao-ui"
+      class="ao-shell"
+      data-api-base="{{ api_base }}"
+      data-initial-experiment-id="{{ initial_experiment_id }}"
+      data-state-root="{{ state_root }}"
+      data-database-path="{{ database_path }}"
+    >
+      <aside class="ao-sidebar" aria-label="Experiments">
+        <div class="ao-brand">
+          <span class="ao-brand-mark" aria-hidden="true"></span>
+          <div>
+            <div class="ao-brand-name">agentic-opt</div>
+            <div class="ao-brand-subtitle">control plane</div>
+          </div>
+        </div>
+        <div class="ao-sidebar-meta">
+          <span id="experiment-count">0 experiments</span>
+          <span id="api-health">API</span>
+        </div>
+        <div id="experiment-list" class="ao-experiment-list" role="listbox" aria-label="Experiment list"></div>
+      </aside>
+
+      <main class="ao-main">
+        <header class="ao-header">
+          <div>
+            <div id="experiment-eyebrow" class="ao-eyebrow">No experiment selected</div>
+            <h1 id="experiment-title">Control Plane</h1>
+          </div>
+          <div id="status-strip" class="ao-status-strip" aria-label="Experiment status"></div>
+        </header>
+
+        <nav class="ao-tabs" aria-label="Control plane sections">
+          <button class="ao-tab is-active" type="button" data-tab="overview">Overview</button>
+          <button class="ao-tab" type="button" data-tab="leaderboard">Leaderboard</button>
+          <button class="ao-tab" type="button" data-tab="analysis">Analysis</button>
+          <button class="ao-tab" type="button" data-tab="traces">Traces</button>
+          <button class="ao-tab" type="button" data-tab="isolation">Isolation</button>
+          <button class="ao-tab" type="button" data-tab="replay">Replay</button>
+        </nav>
+
+        <section id="content" class="ao-content" aria-live="polite"></section>
+      </main>
+    </div>
+    <script src="{{ url_for('static', filename='control_plane_ui.js') }}" defer></script>
+  </body>
+</html>
