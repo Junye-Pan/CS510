@@ -19,7 +19,9 @@ Implemented:
   explicit durable blobs.
 - Flask API and local worker startup path.
 - Semantic worker CLI tools: `ctx`, `artifact`, `eval`, `finding`, `notebook`,
-  `job`, `env`, `telemetry`, `tool`, `knowledge`, and `network`.
+  `job`, `env`, `telemetry`, `tool`, `network`, and `trace`.
+- Task-provided knowledge files are materialized directly under
+  `task/knowledge/` in worker workspaces.
 - Codex/App Server trace files are captured under worker workspaces for current
   runs, but they are not yet first-class trace resources.
 - Local job execution, async evaluation, candidate artifact snapshots on
@@ -37,9 +39,8 @@ Implemented:
 Planned or incomplete:
 
 - `docker_image` environment provider.
-- First-class agent trace bundles with telemetry export adapters such as local
-  JSONL, OTLP/OpenTelemetry, Phoenix-compatible sinks, and
-  Helicone-compatible sinks.
+- Phoenix-compatible and Helicone-compatible trace export sinks beyond the
+  implemented local JSONL and OTLP/OpenTelemetry providers.
 - Full `docker_image` worker runner integration on top of the relay transport.
 - A first-class attempt/run model distinct from evaluations and jobs.
 - Broader task migration and production UI polish.
@@ -90,7 +91,7 @@ Main resource families:
 - Artifacts, including candidate snapshots.
 - Leaderboard entries and incumbents.
 - Findings, notebook checkpoints, telemetry runs, and events.
-- Shared tools, task knowledge items, and network access events.
+- Shared tools, task knowledge file inventory, and network access events.
 - Accepted next resource: agent trace bundles.
 
 Run the local web backend:
@@ -101,11 +102,11 @@ PYTHONPATH=src python3 -m agentic_opt.web.app --state-root ao_state --db ao_stat
 
 Important API groups are under `/api/v1/`, including `tasks`, `experiments`,
 `assignments`, `context`, `environments`, `environment-overlays`, `artifacts`,
-`evaluations`, `leaderboard`, `incumbent`, `jobs`, `findings`,
+`evaluations`, `replay`, `leaderboard`, `incumbent`, `jobs`, `findings`,
 `notebook-checkpoints`, `telemetry-runs`, and `events`.
 
-Additional API groups include `shared-tools`, `knowledge`, and
-`network-access-events`. The accepted next API group is `agent-traces`.
+Additional API groups include `shared-tools`, `network-access-events`, and
+`agent-traces`. Task knowledge inventory is returned as part of task contracts.
 
 ## Worker Tools
 
@@ -147,9 +148,12 @@ ao telemetry start --provider local --name local-run
 # Trace remains an accepted next command
 # ao trace bundle
 ao tool publish --path local_tools/analyzer --name analyzer
-ao knowledge list
 ao network status
 ```
+
+Task-provided knowledge, when present, is exposed as read-only files under
+`task/knowledge/` in the worker workspace and inspected with ordinary file
+tools.
 
 Official scores should go through `ao eval submit`. A valid official submission
 is snapshotted as an artifact, recorded on the leaderboard, and may become the
@@ -210,10 +214,10 @@ forwards only control-plane API paths to the Flask server.
 ## Traces, Shared Tools, And Knowledge
 
 Current Codex worker runs write raw App Server events and summarized output
-under each workspace's `.run/traces/` directory. The next design step is a
-server-owned trace bundle resource with immutable artifacts, digests, and
-optional telemetry export to local JSONL, OpenTelemetry/OTLP, Phoenix-compatible
-sinks, or Helicone-compatible sinks.
+under each workspace's `.run/traces/` directory. The control plane registers
+server-owned trace bundle resources with immutable artifacts, digests, and
+optional telemetry export to local JSONL or OpenTelemetry/OTLP; Phoenix-
+compatible and Helicone-compatible sinks remain future integrations.
 
 Workers can draft reusable helpers in `local_tools/` and publish them to the
 shared tool registry. Published tools are artifact-backed, searchable, and
@@ -221,9 +225,10 @@ checkoutable into `shared_tools/`. Linking published tools to immutable
 AgentTraceBundle records remains future work.
 
 Task packages may include curated read-only knowledge as part of the task
-definition, such as papers, notes, references, and dataset descriptions. The
-knowledge module indexes those files as `KnowledgeItem` records and exposes
-them through worker commands instead of relying on raw filesystem discovery.
+definition, such as PDFs, code, notes, references, and dataset descriptions.
+Those files are copied into `task/knowledge/` in the worker workspace. The
+directory layout is task-defined, and workers inspect it with ordinary file
+tools.
 
 ## Task Packages
 

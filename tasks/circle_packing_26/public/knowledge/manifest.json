@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "heuristic_notes",
+      "path": "agent_briefing/heuristic_notes.md",
+      "title": "Heuristic Notes",
+      "summary": "Task-authored notes about search behavior for the 26-circle packing task."
+    },
+    {
+      "id": "lp_radius_reference",
+      "path": "local_reference/snippets/lp_radius_reference.py",
+      "title": "LP Radius Reference",
+      "summary": "Small reference snippet for recomputing radii from fixed centers."
+    },
+    {
+      "id": "contact_graph_note",
+      "path": "geometry_background/contact_graph_note.pdf",
+      "title": "Contact Graph Placeholder PDF",
+      "summary": "Mock PDF knowledge item used to verify non-text files are carried into the workspace."
+    }
+  ]
+}

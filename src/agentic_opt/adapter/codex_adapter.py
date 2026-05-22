@@ -273,16 +273,17 @@ class AppServerCodexAdapter(CodexAdapter):
             hints.append(f"skills: {instructions.skills_root_path}")
         if workspace.allow_network:
             access_guidance = (
-                "Use semantic server tools (`ctx`, `artifact`, `eval`, `finding`, `notebook`, `job`, `env`, "
-                "`telemetry`) for "
+                "Use semantic server tools (`ctx`, `attempt`, `artifact`, `eval`, `finding`, `notebook`, `job`, "
+                "`env`, `telemetry`, `tool`, `network`, `trace`) for "
                 "experiment history, artifacts, feedback, and durable state. Network access may be available so these "
                 "tools can reach the local control plane and approved runtime resources; do not browse or depend on "
                 "hidden evaluator logic, private assets, or non-public archives."
             )
         else:
             access_guidance = (
-                "Network access is disabled. Use semantic server tools (`ctx`, `artifact`, `eval`, `finding`, "
-                "`notebook`, `job`, `env`, `telemetry`) for experiment history, artifacts, feedback, and durable "
+                "Network access is disabled. Use semantic server tools (`ctx`, `attempt`, `artifact`, `eval`, "
+                "`finding`, `notebook`, `job`, `env`, `telemetry`, `tool`, `network`, `trace`) for "
+                "experiment history, artifacts, feedback, and durable "
                 "state; do not browse or depend on hidden evaluator logic, private assets, or non-public archives."
             )
         guidance = [
@@ -294,6 +295,13 @@ class AppServerCodexAdapter(CodexAdapter):
         return "\n".join(guidance).strip()
 
     def _sandbox_policy(self, workspace: WorkspacePolicy) -> dict[str, Any]:
+        if workspace.sandbox_mode == "danger-full-access":
+            return {"type": "dangerFullAccess"}
+        if workspace.sandbox_mode == "read-only":
+            return {
+                "type": "readOnly",
+                "networkAccess": workspace.allow_network,
+            }
         return {
             "type": "workspaceWrite",
             "writableRoots": workspace.writable_roots,

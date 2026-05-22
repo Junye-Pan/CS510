@@ -33,9 +33,11 @@ Tests live in `tests/`.
 - Do not encode a fixed numbered workflow in prompts, skills, or controller logic.
 - Agents should access history, artifacts, feedback, jobs, environments,
   leaderboard/incumbent state, findings, notebook checkpoints, shared tools,
-  task knowledge, and network policy through
+  and network policy through
   semantic server tools: `ctx`, `artifact`, `eval`, `finding`, `notebook`,
-  `job`, `env`, `telemetry`, `tool`, `knowledge`, and `network`.
+  `job`, `env`, `telemetry`, `tool`, and `network`.
+- Task knowledge is provided as read-only files under `task/knowledge/` in the
+  worker workspace when the task package includes `public/knowledge/`.
 - Important unresolved design questions should be recorded in `docs/plan.md`.
 
 ## Commands
@@ -46,7 +48,6 @@ Tests live in `tests/`.
 - `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli --help`
 - `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli env --help`
 - `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli tool --help`
-- `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli knowledge --help`
 - `PYTHONPATH=src python3 -m agentic_opt.worker_tools.semantic_cli network --help`
 - `PYTHONPATH=src python3 -m agentic_opt.web.app --help`
 

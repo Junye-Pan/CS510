@@ -12,7 +12,7 @@ We propose an agentic optimization framework that shifts substantially more of
 this search behavior back to the coding agent itself. The framework consists of
 a CLI coding agent, a task API, a server-owned control plane, semantic worker
 tools, managed runtime environments, and an artifact store. The control plane
-owns experiments, assignments, sessions, evaluations, artifacts, jobs,
+owns experiments, assignments, sessions, attempts, evaluations, artifacts, jobs,
 environments, findings, notebook checkpoints, telemetry, shared tools, task
 knowledge, network policy, leaderboard entries, and incumbents. Filesystem
 storage remains important for artifacts, logs, workspaces, environment
@@ -78,9 +78,10 @@ The current framework is server-first. Its core components are:
 - **Control plane.** A Flask + SQLite service owns semantic state. Workers do
   not scrape archive directories for meaning; they call server APIs through
   semantic CLI tools.
-- **Semantic worker tools.** Worker-facing commands include `ctx`, `artifact`,
-  `eval`, `finding`, `notebook`, `job`, `env`, `telemetry`, `tool`,
-  `knowledge`, and `network`. The accepted next command surface is `trace`.
+- **Semantic worker tools.** Worker-facing commands include `ctx`, `attempt`,
+  `artifact`, `eval`, `finding`, `notebook`, `job`, `env`, `telemetry`, `tool`,
+  `network`, and read-only `trace`. Task knowledge is exposed as files under
+  `task/knowledge/` in the worker workspace.
 - **Environment providers.** Runtime environments are controlled resources.
   The current default provider is `local_venv`; `docker_image` remains the
   target provider for reproducible containerized workers and evaluation.
@@ -131,6 +132,7 @@ Important current resource types include:
 - `Experiment`
 - `WorkerAssignment`
 - `WorkerSession`
+- `Attempt`
 - `Environment`
 - `EnvironmentOverlay`
 - `Artifact`
@@ -142,14 +144,15 @@ Important current resource types include:
 - `NotebookCheckpoint`
 - `TelemetryRun`
 - `SharedTool`
-- `KnowledgeItem`
+- `TaskKnowledgeFile`
 - `NetworkAccessEvent`
 
-Historical attempts are not yet represented by a dedicated `Attempt` table.
-Today, candidate history is primarily represented by candidate artifacts,
-evaluations, leaderboard entries, incumbents, events, notebook checkpoints, and
-job/telemetry records. A first-class attempt/run model remains an open design
-target.
+Historical attempts are represented by a dedicated `Attempt` resource. It links
+the experiment, assignment/session, task, agent, research direction, optional
+parent attempt, lifecycle status, and optional candidate artifact. Artifacts,
+evaluations, jobs, and telemetry can attach through `attempt_id`. Attempts do
+not store summaries; durable narrative belongs in findings or notebook
+checkpoints.
 
 Agent-authored memory is deliberately split into several forms:
 
@@ -162,10 +165,10 @@ Agent-authored memory is deliberately split into several forms:
   discover and checkout.
 
 Task-provided knowledge is separate from agent-authored memory. A task may
-include curated read-only materials under `public/knowledge/` with a manifest.
-These become `KnowledgeItem` records and are accessed through the `knowledge`
-tool. Knowledge is part of the task definition, not a loophole around network
-policy and not a worker-generated finding.
+include curated read-only materials under `public/knowledge/` with an optional
+manifest. These files are materialized directly under `task/knowledge/` in the
+worker workspace. Knowledge is part of the task definition, not a loophole
+around network policy and not a worker-generated finding.
 
 ## 5. Semantic Tools
 
@@ -173,9 +176,10 @@ The worker should access server-owned state through semantic commands rather
 than raw filesystem archaeology. The active command surface is:
 
 ```text
-ctx         assignment, task, findings, artifacts, evaluations, jobs,
-            environments, leaderboard, incumbent, telemetry, knowledge,
-            shared tools, and network state
+ctx         assignment, task, attempts, findings, artifacts, evaluations, jobs,
+            environments, leaderboard, incumbent, telemetry, shared tools, and
+            network state
+attempt     create, list, show, and update candidate attempt records
 artifact    upload durable files/directories and checkout incumbents
 eval        verify, probe, submit, status, wait
 finding     share or search reusable agent-authored findings
@@ -184,17 +188,19 @@ job         launch durable local, Docker, or provider-backed jobs
 env         inspect task environments and request dependency overlays
 telemetry   record non-official metrics and run metadata
 tool        publish, list, show, checkout, and install shared tools
-knowledge   list, show, and materialize task-provided context
 network     inspect external internet policy and access events
+trace       inspect registered coding-agent turns, commands, events, and search
 ```
 
 These are capabilities, not a fixed workflow. The worker startup prompt and
 skills describe the tools, but they do not impose a numbered algorithm.
 
-The accepted near-term missing command is `trace`. Raw Codex/App Server traces
-are currently written under worker workspaces, but there is not yet a
-server-owned `AgentTraceBundle` resource with immutable trace artifacts and
-export providers.
+`trace` is read-only worker context. Raw Codex/App Server traces are registered
+automatically as server-owned `AgentTraceBundle` rows backed by immutable local
+artifacts. Workers can list/show traces, inspect normalized commands/events, and
+search command/message text. Worker-triggered bundle/export commands, external
+export providers, and automatic trace summaries are out of scope for the active
+surface.
 
 ## 6. Environment Control
 
@@ -226,8 +232,8 @@ access.
 
 ```text
 control_plane_network
-  Required for semantic tools such as ctx, eval, artifact, finding, notebook,
-  job, env, telemetry, tool, knowledge, and network.
+  Required for semantic tools such as ctx, attempt, eval, artifact, finding,
+  notebook, job, env, telemetry, tool, and network.
 
 external_internet
   Experiment policy controlling live web search, arbitrary HTTP clients,
@@ -264,10 +270,10 @@ or controller logic. A typical session shape is:
 3. A worker session starts and prepares a semantic workspace.
 4. The task base environment is resolved through `EnvironmentService`.
 5. The workspace receives semantic CLI wrappers, AGENTS.md, local skills,
-   candidate seed files, knowledge/shared-tool directories, and runtime/network
-   exports.
-6. The agent reads selectively through `ctx`, `knowledge`, `finding`,
-   `artifact`, `leaderboard`, `incumbent`, and related tools.
+   candidate seed files, task knowledge files, shared-tool directories, and
+   runtime/network exports.
+6. The agent reads selectively through workspace files plus `ctx`, `attempt`,
+   `finding`, `artifact`, `leaderboard`, `incumbent`, and related tools.
 7. The agent edits candidates, runs local checks, requests verify/probe
    feedback, launches jobs, checkpoints notebooks, shares findings, publishes
    tools, and submits when useful.
@@ -318,7 +324,7 @@ prepared semantic workspace. The workspace includes:
 - task runtime environment exports
 - network policy exports
 - `WORKLOG.md`
-- `local_tools/`, `shared_tools/`, `knowledge/`, `artifacts/`, and other
+- `local_tools/`, `shared_tools/`, `task/knowledge/`, `artifacts/`, and other
   workspace directories
 
 The adapter should rely on sandbox policy, filesystem permissions, environment
@@ -389,9 +395,10 @@ coding agent remains the primary search actor.
 
 Important gaps remain:
 
-- No dedicated `Attempt` table yet.
-- No first-class `AgentTraceBundle` service yet. Raw Codex traces exist, but
-  server-indexed immutable trace bundles and exporters remain future work.
+- Local JSONL and OTLP trace export are implemented as observability mirrors.
+  Phoenix-compatible and Helicone-compatible exporters remain future work. The
+  active trace source of truth is automatic `AgentTraceBundle` registration plus
+  immutable local artifacts.
 - `docker_image` is still a planned environment provider, although Docker job
   network enforcement and the Unix-socket control-plane relay exist.
 - `codex-local` cannot truly block public internet while preserving App Server

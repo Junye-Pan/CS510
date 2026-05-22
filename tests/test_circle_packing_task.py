@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from agentic_opt.adapter.semantic_workspace import prepare_semantic_workspace
+from agentic_opt.common.runtime_env import PreparedRuntimeEnv, TaskRuntimeSpec
 from agentic_opt.control_plane.service import task_contract
 from agentic_opt.task_registry import get_task
 from agentic_opt.web.app import create_app
@@ -21,11 +26,59 @@ class CirclePackingTaskTests(unittest.TestCase):
         self.assertIn("TASK.md", public_paths)
         self.assertIn("public_contract.md", public_paths)
         self.assertIn("research_directions/manifest.json", public_paths)
+        self.assertNotIn("knowledge/manifest.json", public_paths)
+        self.assertTrue(contract["task_knowledge"]["available"])
+        knowledge_paths = {item["relative_path"] for item in contract["task_knowledge"]["files"]}
+        self.assertIn("agent_briefing/heuristic_notes.md", knowledge_paths)
+        self.assertIn("local_reference/snippets/lp_radius_reference.py", knowledge_paths)
+        self.assertIn("geometry_background/contact_graph_note.pdf", knowledge_paths)
+        self.assertTrue(contract["task_knowledge"]["digest"].startswith("sha256:"))
 
         directions = contract["public_context"]["research_directions"]
         self.assertGreaterEqual(len(directions), 3)
         self.assertTrue(all("direction_id" in item for item in directions))
         self.assertTrue(all("doc_markdown" in item for item in directions))
+
+    def test_circle_packing_knowledge_materializes_in_semantic_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir(parents=True, exist_ok=True)
+            runtime_env = PreparedRuntimeEnv(
+                task_id="circle_packing_26",
+                fingerprint="test",
+                root=runtime_root,
+                venv_dir=runtime_root,
+                python_path=Path(sys.executable),
+                manifest_path=runtime_root / "manifest.json",
+                spec=TaskRuntimeSpec(verify_public_seed=False),
+            )
+            assignment = {
+                "assignment_id": "assign_circle",
+                "experiment_id": "exp_circle",
+                "task_id": "circle_packing_26",
+                "agent_id": "agent_circle",
+            }
+
+            workspace = prepare_semantic_workspace(
+                workspace_root=root / "workspace",
+                api_url="http://127.0.0.1:5000",
+                assignment=assignment,
+                session_id="session_circle",
+                runtime_env=runtime_env,
+            )
+
+            knowledge_root = workspace.root / "task" / "knowledge"
+            self.assertIn("Boundary", (knowledge_root / "agent_briefing" / "heuristic_notes.md").read_text(encoding="utf-8"))
+            self.assertIn("recompute_radii_for_centers", (knowledge_root / "local_reference" / "snippets" / "lp_radius_reference.py").read_text(encoding="utf-8"))
+            self.assertTrue((knowledge_root / "geometry_background" / "contact_graph_note.pdf").exists())
+            inventory = json.loads((workspace.root / "task" / "knowledge_inventory.json").read_text(encoding="utf-8"))
+            self.assertEqual(inventory["file_count"], 5)
+            self.assertTrue(inventory["digest"].startswith("sha256:"))
+            self.assertTrue(all(item["read_only"] for item in inventory["files"]))
+            current_state = json.loads((workspace.root / "context" / "current_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(current_state["task_knowledge"]["digest"], inventory["digest"])
+            self.assertFalse(os.access(knowledge_root / "agent_briefing" / "heuristic_notes.md", os.W_OK))
 
     def test_seed_candidate_verifies_probes_and_evaluates(self) -> None:
         task = get_task("circle_packing_26")
@@ -210,6 +263,9 @@ def run_packing():
         self.addCleanup(tempdir.cleanup)
         root = Path(tempdir.name)
         app = create_app(state_root=root / "state", database_path=root / "state" / "control.sqlite3")
+        ctx = app.config["AO_CONTEXT"]
+        self.addCleanup(ctx.control_service.close)
+        self.addCleanup(ctx.workers.close)
         client = app.test_client()
         created = client.post(
             "/api/v1/experiments",
