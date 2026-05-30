@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 import os
 import shutil
 import subprocess
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from agentic_opt.common.atomic import atomic_write_text
 from agentic_opt.common.config import get_repo_root
+from agentic_opt.common.files import (
+    digest_directory as _digest_directory,
+    digest_file as _digest_file,
+    size_bytes as _size_bytes,
+)
 from agentic_opt.common.numpy_loader import import_numpy
 from agentic_opt.common.runtime_env import RuntimeEnvironmentError
 from agentic_opt.common.snapshot import copy_snapshot
@@ -30,7 +35,7 @@ from .environment_providers import (
 )
 from .jobs import JobService
 from .process_env import build_subprocess_env, sanitize_env
-from .repository import ControlPlaneRepository
+from .repository import ControlPlaneRepository, TERMINAL_ASSIGNMENT_STATUSES
 from .task_context import (
     append_docker_task_context_mount,
     docker_task_context_enforcement,
@@ -76,6 +81,18 @@ class EvaluationService:
                 "input_kind": "artifact_snapshot",
                 "entry_path": _entry_path_for_artifact(artifact),
             }
+        evaluation_id = payload.get("evaluation_id") or make_run_id("eval")
+        task_runs_root = _task_runs_root_for_evaluation(
+            state_root=self.state_root,
+            task_id=request["task_id"],
+            evaluation_id=evaluation_id,
+        )
+        task_runs_root.mkdir(parents=True, exist_ok=True)
+        request = {
+            **request,
+            "experiment_run_root": str(_experiment_run_root(self.state_root)),
+            "task_runs_root": str(task_runs_root),
+        }
         run_async = _evaluation_async_requested(payload, request["kind"])
         execution = self._resolve_execution_environment(request)
         framework_environment = self.environments.ensure_framework_environment()
@@ -108,15 +125,16 @@ class EvaluationService:
             "task_context_enforcement": task_context_enforcement,
         }
         record = self.repository.create_evaluation(
-                {
-                    "experiment_id": request["experiment_id"],
-                    "assignment_id": request.get("assignment_id"),
-                    "attempt_id": request.get("attempt_id"),
-                    "artifact_id": request.get("artifact_id"),
-                    "kind": request["kind"],
-                    "status": "queued" if run_async else "running",
-                    "request": request,
-                }
+            {
+                "evaluation_id": evaluation_id,
+                "experiment_id": request["experiment_id"],
+                "assignment_id": request.get("assignment_id"),
+                "attempt_id": request.get("attempt_id"),
+                "artifact_id": request.get("artifact_id"),
+                "kind": request["kind"],
+                "status": "queued" if run_async else "running",
+                "request": request,
+            }
         )
         if not run_async:
             return self._run_in_environment(record["evaluation_id"], request, execution)
@@ -195,7 +213,7 @@ class EvaluationService:
             pre_task_context = verify_request_task_context(request)
             if not pre_task_context["ok"]:
                 raise RuntimeError(f"task_context_verification_failed_before_run: {pre_task_context}")
-            result, valid, score, public_feedback = self._run_request(request)
+            result, valid, score, public_feedback = self._run_request(evaluation_id, request)
             post_task_context = verify_request_task_context(request)
             if not post_task_context["ok"]:
                 raise RuntimeError(f"task_context_verification_failed_after_run: {post_task_context}")
@@ -235,6 +253,7 @@ class EvaluationService:
             )
             event_type = f"evaluation.{request.get('kind', record['kind'])}.failed"
             summary = f"{request.get('kind', record['kind'])} evaluation failed"
+        budget_stop = self._complete_evaluator_budget_if_exhausted(updated)
         self.repository.record_event(
             {
                 "experiment_id": updated["experiment_id"],
@@ -248,6 +267,7 @@ class EvaluationService:
                     "valid": updated.get("valid"),
                     "score": updated.get("score"),
                     "status": updated["status"],
+                    "budget_stop": budget_stop,
                 },
             }
         )
@@ -259,6 +279,7 @@ class EvaluationService:
         experiment_id = payload.get("experiment_id") or (assignment or {}).get("experiment_id")
         if not experiment_id:
             raise ValueError("experiment_id or assignment_id is required")
+        experiment = self.repository.get_experiment(experiment_id)
         task_id = payload.get("task_id") or (assignment or {}).get("task_id")
         if not task_id:
             raise ValueError("task_id or assignment_id is required")
@@ -276,6 +297,16 @@ class EvaluationService:
             input_kind = "artifact"
         else:
             raise ValueError("entry_path or artifact_id is required")
+        kind = payload.get("kind") or "submit"
+        forced_from_kind: str | None = None
+        if kind == "verify" and _request_forces_verify_as_submit(assignment=assignment, experiment=experiment):
+            forced_from_kind = "verify"
+            kind = "submit"
+        required_definitions = _required_kernel_definitions_for_request(
+            payload=payload,
+            assignment=assignment,
+            experiment=experiment,
+        )
         return {
             "experiment_id": experiment_id,
             "assignment_id": assignment_id,
@@ -283,7 +314,9 @@ class EvaluationService:
             "attempt_id": payload.get("attempt_id"),
             "task_id": task_id,
             "agent_id": (assignment or {}).get("agent_id"),
-            "kind": payload.get("kind") or "submit",
+            "kind": kind,
+            "original_kind": forced_from_kind or payload.get("kind"),
+            "forced_submit_from_verify": bool(forced_from_kind),
             "input_kind": input_kind,
             "entry_path": str(entry_path),
             "workspace_root": payload.get("workspace_root"),
@@ -295,25 +328,35 @@ class EvaluationService:
             "publish_leaderboard": payload.get("publish_leaderboard"),
             "count_budget": payload.get("count_budget"),
             "expected_task_context_digest": payload.get("expected_task_context_digest"),
+            "required_kernel_definitions": required_definitions,
         }
 
     def _enforce_evaluator_budget(self, request: dict[str, Any]) -> None:
         if not _request_counts_toward_leaderboard_budget(request):
             return
         experiment_id = request.get("experiment_id")
+        assignment_id = request.get("assignment_id")
+        if _active_leaderboard_evaluation_exists(
+            self.repository,
+            experiment_id=experiment_id,
+            assignment_id=assignment_id,
+        ):
+            raise ValueError(
+                "active_evaluator_running: wait for the current submit evaluation "
+                "to finish before starting another official evaluator for this assignment"
+            )
         experiment = self.repository.get_experiment(experiment_id) if experiment_id else None
         experiment_budget = (experiment or {}).get("budget") or {}
         experiment_limit = _positive_int(experiment_budget.get("total_evaluator_runs") or experiment_budget.get("evaluator_runs"))
         if experiment_limit is not None and experiment_id:
-            experiment_used = _leaderboard_budget_used(self.repository, experiment_id=experiment_id)
+            experiment_used = _evaluator_budget_used(self.repository, experiment_id=experiment_id)
             if experiment_used >= experiment_limit:
                 raise ValueError("evaluator_budget_exhausted: experiment evaluator budget exhausted")
 
-        assignment_id = request.get("assignment_id")
         assignment = self.repository.get_assignment(assignment_id) if assignment_id else None
         assignment_limit = _positive_int(((assignment or {}).get("budget") or {}).get("evaluator_runs"))
         if assignment_limit is not None and assignment_id:
-            assignment_used = _leaderboard_budget_used(
+            assignment_used = _evaluator_budget_used(
                 self.repository,
                 experiment_id=experiment_id,
                 assignment_id=assignment_id,
@@ -321,35 +364,37 @@ class EvaluationService:
             if assignment_used >= assignment_limit:
                 raise ValueError("evaluator_budget_exhausted: assignment evaluator budget exhausted")
 
-    def _run_request(self, request: dict[str, Any]) -> tuple[dict[str, Any], bool, float | None, dict[str, Any]]:
-        task = get_task(request["task_id"])
+    def _run_request(self, evaluation_id: str, request: dict[str, Any]) -> tuple[dict[str, Any], bool, float | None, dict[str, Any]]:
         entry_path = Path(request["entry_path"]).resolve()
         kind = request.get("kind") or "submit"
-        if kind == "verify":
-            result = _json_compatible(task.verify_entry(entry_path))
-            valid = bool(result.get("valid"))
-            score = None
-            public_feedback = result.get("feedback") or result
-        elif kind == "probe":
-            probe_kind = str(request.get("probe_kind") or "diagnostics")
-            result = _json_compatible(task.probe_entry(entry_path, kind=probe_kind))
-            valid = bool(result.get("valid", True))
-            score = result.get("score")
-            public_feedback = result
-        elif kind in {"submit", "official"}:
-            verifier = _json_compatible(task.verify_entry(entry_path))
-            if not verifier.get("valid"):
-                result = {"verifier": verifier, "evaluated": False}
-                valid = False
-                score = 0.0
-                public_feedback = verifier.get("feedback") or verifier
+        with _temporary_task_evaluation_env(evaluation_id=evaluation_id, request=request):
+            task = get_task(request["task_id"])
+            if kind == "verify":
+                result = _json_compatible(task.verify_entry(entry_path))
+                valid = bool(result.get("valid"))
+                score = None
+                public_feedback = result.get("feedback") or result
+            elif kind == "probe":
+                probe_kind = str(request.get("probe_kind") or "diagnostics")
+                result = _json_compatible(task.probe_entry(entry_path, kind=probe_kind))
+                valid = bool(result.get("valid", True))
+                score = result.get("score")
+                public_feedback = result
+            elif kind in {"submit", "official"}:
+                with _submit_preverify_env():
+                    verifier = _json_compatible(task.verify_entry(entry_path))
+                if not verifier.get("valid"):
+                    result = {"verifier": verifier, "evaluated": False}
+                    valid = False
+                    score = 0.0
+                    public_feedback = verifier.get("feedback") or verifier
+                else:
+                    result = _json_compatible(task.evaluate_entry(entry_path))
+                    valid = bool(result.get("correct", {}).get("correct", True))
+                    score = float(result["score"])
+                    public_feedback = result.get("evaluator", {}).get("public_details") or {}
             else:
-                result = _json_compatible(task.evaluate_entry(entry_path))
-                valid = bool(result.get("correct", {}).get("correct", True))
-                score = float(result["score"])
-                public_feedback = result.get("evaluator", {}).get("public_details") or {}
-        else:
-            raise ValueError(f"unknown evaluation kind: {kind}")
+                raise ValueError(f"unknown evaluation kind: {kind}")
         return result, valid, score, public_feedback
 
     def _resolve_execution_environment(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -504,6 +549,130 @@ class EvaluationService:
             )
         return entry
 
+    def _complete_evaluator_budget_if_exhausted(self, evaluation: dict[str, Any]) -> dict[str, Any] | None:
+        if not _evaluation_counts_toward_evaluator_budget(evaluation):
+            return None
+
+        request = evaluation.get("request") or {}
+        experiment_id = evaluation.get("experiment_id")
+        if not experiment_id:
+            return None
+        experiment = self.repository.get_experiment(str(experiment_id))
+        if experiment is None:
+            return None
+
+        assignment_id = evaluation.get("assignment_id")
+        assignment = self.repository.get_assignment(str(assignment_id)) if assignment_id else None
+        experiment_budget = experiment.get("budget") or {}
+        experiment_limit = _positive_int(experiment_budget.get("total_evaluator_runs") or experiment_budget.get("evaluator_runs"))
+        assignment_limit = _positive_int(((assignment or {}).get("budget") or {}).get("evaluator_runs"))
+
+        experiment_used = _evaluator_budget_used(self.repository, experiment_id=str(experiment_id))
+        assignment_used = (
+            _evaluator_budget_used(
+                self.repository,
+                experiment_id=str(experiment_id),
+                assignment_id=str(assignment_id),
+            )
+            if assignment_id
+            else None
+        )
+        base_state = {
+            "source": "evaluation_service",
+            "reason": "evaluator_budget_exhausted",
+            "evaluation_id": evaluation["evaluation_id"],
+            "artifact_id": evaluation.get("artifact_id"),
+            "kind": evaluation.get("kind") or request.get("kind"),
+            "counting_rule": "submit_and_official_only; verifier_and_probe_excluded",
+            "experiment_limit": experiment_limit,
+            "experiment_used": experiment_used,
+            "assignment_limit": assignment_limit,
+            "assignment_used": assignment_used,
+        }
+
+        stopped_assignments: list[str] = []
+        exhausted_scopes: list[str] = []
+        if assignment is not None and assignment_limit is not None and assignment_used is not None and assignment_used >= assignment_limit:
+            stopped = self._mark_assignment_budget_exhausted(
+                assignment=assignment,
+                budget_state={**base_state, "scope": "assignment"},
+            )
+            if stopped is not None:
+                stopped_assignments.append(stopped["assignment_id"])
+            exhausted_scopes.append("assignment")
+
+        if experiment_limit is not None and experiment_used >= experiment_limit:
+            exhausted_scopes.append("experiment")
+            experiment_state = {**base_state, "scope": "experiment"}
+            for item in self.repository.list_assignments(experiment_id=str(experiment_id)):
+                stopped = self._mark_assignment_budget_exhausted(
+                    assignment=item,
+                    budget_state=experiment_state,
+                )
+                if stopped is not None:
+                    stopped_assignments.append(stopped["assignment_id"])
+            current_experiment = self.repository.get_experiment(str(experiment_id)) or experiment
+            self.repository.update_experiment_status(
+                str(experiment_id),
+                str(current_experiment.get("status") or "running"),
+                metadata={
+                    "budget_exhausted": experiment_state,
+                },
+            )
+            self.repository.record_event(
+                {
+                    "experiment_id": str(experiment_id),
+                    "task_id": experiment["task_id"],
+                    "event_type": "experiment.budget_exhausted",
+                    "summary": "experiment evaluator budget exhausted",
+                    "payload": experiment_state,
+                }
+            )
+
+        if not exhausted_scopes:
+            return None
+        return {
+            "exhausted": True,
+            "scopes": sorted(set(exhausted_scopes)),
+            "stopped_assignments": sorted(set(stopped_assignments)),
+            **base_state,
+        }
+
+    def _mark_assignment_budget_exhausted(
+        self,
+        *,
+        assignment: dict[str, Any],
+        budget_state: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if assignment.get("status") in TERMINAL_ASSIGNMENT_STATUSES:
+            return None
+        stop_condition = {
+            "source": "evaluation_service",
+            "scope": "assignment",
+            "reason": "evaluator_budget_exhausted",
+            "evaluation_id": budget_state.get("evaluation_id"),
+        }
+        updated = self.repository.update_assignment_status(
+            assignment["assignment_id"],
+            "completed",
+            metadata={
+                "budget_exhausted": budget_state,
+                "stop_condition": stop_condition,
+            },
+        )
+        self.repository.record_event(
+            {
+                "experiment_id": assignment["experiment_id"],
+                "assignment_id": assignment["assignment_id"],
+                "task_id": assignment["task_id"],
+                "agent_id": assignment.get("agent_id"),
+                "event_type": "assignment.budget_exhausted",
+                "summary": "assignment evaluator budget exhausted",
+                "payload": budget_state,
+            }
+        )
+        return updated
+
     def _run_in_environment(self, evaluation_id: str, request: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
         provider = provider_for_execution(execution)
         plan = provider.build_run_plan(
@@ -570,6 +739,71 @@ def _json_compatible(value: Any) -> Any:
     return value
 
 
+def _experiment_run_root(state_root: Path) -> Path:
+    return state_root.parent if state_root.name == "state" else state_root
+
+
+def _task_runs_root_for_evaluation(*, state_root: Path, task_id: str, evaluation_id: str) -> Path:
+    return (
+        _experiment_run_root(state_root)
+        / "task_runs"
+        / _safe_path_component(task_id)
+        / _safe_path_component(evaluation_id)
+    )
+
+
+def _safe_path_component(value: str) -> str:
+    cleaned = "".join(char if char.isalnum() or char in "._-" else "_" for char in str(value))
+    cleaned = cleaned.strip("._")
+    return cleaned or "unknown"
+
+
+@contextmanager
+def _temporary_task_evaluation_env(evaluation_id: str, request: dict[str, Any]) -> Any:
+    values = {
+        "AO_EVALUATION_ID": evaluation_id,
+        "AO_EXPERIMENT_ID": request.get("experiment_id"),
+        "AO_ASSIGNMENT_ID": request.get("assignment_id"),
+        "AO_TASK_ID": request.get("task_id"),
+        "AO_EXPERIMENT_RUN_ROOT": request.get("experiment_run_root"),
+        "AO_TASK_RUNS_ROOT": request.get("task_runs_root"),
+        "AO_EVALUATION_RUNS_ROOT": request.get("task_runs_root"),
+        "AO_LLM_KERNEL_REQUIRED_DEFINITIONS": ",".join(request.get("required_kernel_definitions") or []),
+    }
+    previous = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = str(value)
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@contextmanager
+def _submit_preverify_env() -> Any:
+    values = {
+        "AO_LLM_KERNEL_STATIC_VERIFY_ONLY": "1",
+    }
+    previous = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            os.environ[name] = value
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _evaluation_async_requested(payload: dict[str, Any], kind: str) -> bool:
     if "async" in payload:
         return bool(payload["async"])
@@ -578,7 +812,7 @@ def _evaluation_async_requested(payload: dict[str, Any], kind: str) -> bool:
     return kind in {"submit", "official"}
 
 
-def _leaderboard_budget_used(
+def _evaluator_budget_used(
     repository: ControlPlaneRepository,
     *,
     experiment_id: str | None,
@@ -586,17 +820,36 @@ def _leaderboard_budget_used(
 ) -> int:
     if not experiment_id:
         return 0
-    leaderboard_used = sum(
-        1
-        for entry in repository.list_leaderboard_entries(experiment_id=experiment_id, limit=1_000_000)
-        if assignment_id is None or entry.get("assignment_id") == assignment_id
-    )
-    pending_used = sum(
+    return sum(
         1
         for evaluation in repository.list_evaluations(experiment_id=experiment_id, assignment_id=assignment_id)
-        if _pending_evaluation_counts_toward_leaderboard_budget(evaluation)
+        if _evaluation_counts_toward_evaluator_budget(evaluation)
     )
-    return leaderboard_used + pending_used
+
+
+def _active_leaderboard_evaluation_exists(
+    repository: ControlPlaneRepository,
+    *,
+    experiment_id: str | None,
+    assignment_id: str | None,
+) -> bool:
+    if not experiment_id or not assignment_id:
+        return False
+    return any(
+        _pending_evaluation_counts_toward_leaderboard_budget(evaluation)
+        for evaluation in repository.list_evaluations(
+            experiment_id=experiment_id,
+            assignment_id=assignment_id,
+        )
+    )
+
+
+def _evaluation_counts_toward_evaluator_budget(evaluation: dict[str, Any]) -> bool:
+    if evaluation.get("status") in {"cancelled", "stopped"}:
+        return False
+    request = evaluation.get("request") or {}
+    kind = evaluation.get("kind") or request.get("kind")
+    return _request_counts_toward_leaderboard_budget({**request, "kind": kind})
 
 
 def _pending_evaluation_counts_toward_leaderboard_budget(evaluation: dict[str, Any]) -> bool:
@@ -629,6 +882,48 @@ def _positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _request_forces_verify_as_submit(
+    *,
+    assignment: dict[str, Any] | None,
+    experiment: dict[str, Any] | None,
+) -> bool:
+    assignment_metadata = (assignment or {}).get("metadata") or {}
+    if assignment_metadata.get("force_verify_as_submit"):
+        return True
+    optimization = _experiment_optimization_config(experiment)
+    return bool(optimization.get("force_verify_as_submit"))
+
+
+def _required_kernel_definitions_for_request(
+    *,
+    payload: dict[str, Any],
+    assignment: dict[str, Any] | None,
+    experiment: dict[str, Any] | None,
+) -> list[str]:
+    raw = payload.get("required_kernel_definitions") or payload.get("required_definitions")
+    assignment_metadata = (assignment or {}).get("metadata") or {}
+    raw = raw or assignment_metadata.get("required_kernel_definitions")
+    optimization = _experiment_optimization_config(experiment)
+    raw = raw or optimization.get("required_kernel_definitions")
+    if not raw and optimization.get("require_all_kernel_definitions"):
+        raw = optimization.get("kernel_definitions")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        values = [item.strip() for item in raw.split(",")]
+    elif isinstance(raw, (list, tuple)):
+        values = [str(item).strip() for item in raw]
+    else:
+        return []
+    return sorted({item for item in values if item})
+
+
+def _experiment_optimization_config(experiment: dict[str, Any] | None) -> dict[str, Any]:
+    config = (experiment or {}).get("config") or {}
+    optimization = config.get("optimization") if isinstance(config, dict) else None
+    return optimization if isinstance(optimization, dict) else {}
+
+
 def _leaderboard_eligible_kind(kind: str | None) -> bool:
     return (kind or "submit") in {"submit", "official"}
 
@@ -639,7 +934,36 @@ def _entry_path_for_artifact(artifact: dict[str, Any]) -> str:
     entry_relative_path = metadata.get("entry_relative_path")
     if local_path.is_dir() and entry_relative_path:
         return str((local_path / str(entry_relative_path)).resolve())
+    if local_path.is_dir():
+        inferred = _infer_artifact_entry_path(local_path, metadata=metadata)
+        if inferred is not None:
+            return str(inferred)
     return str(local_path)
+
+
+def _infer_artifact_entry_path(local_path: Path, *, metadata: dict[str, Any]) -> Path | None:
+    candidates: list[str] = []
+    task_id = metadata.get("task_id")
+    if task_id:
+        try:
+            task = get_task(str(task_id))
+            spec = candidate_spec_for(task)
+        except Exception:
+            spec = None
+        if spec is not None:
+            candidates.append(spec.workspace_entrypoint.as_posix())
+            candidates.append(spec.entrypoint_name)
+
+    candidates.extend(("manifest.json", "entry.py", "candidate/manifest.json", "candidate/entry.py"))
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        path = local_path / candidate
+        if path.is_file():
+            return path.resolve()
+    return None
 
 
 def _execution_subprocess_env(execution: dict[str, Any]) -> dict[str, str]:
@@ -748,6 +1072,10 @@ def _evaluation_docker_mounts(*, request: dict[str, Any], database_path: Path) -
         DockerMount(source=state_root, target=str(state_root)),
         DockerMount(source=repo_root, target=str(repo_root), read_only=True),
     ]
+    task_runs_root = request.get("task_runs_root")
+    if task_runs_root:
+        task_runs_path = Path(str(task_runs_root)).resolve()
+        mounts.append(DockerMount(source=task_runs_path, target=str(task_runs_path)))
     entry_path = Path(request["entry_path"]).resolve()
     if not _path_is_relative_to(entry_path, state_root) and not _path_is_relative_to(entry_path, repo_root):
         mounts.append(DockerMount(source=entry_path.parent, target=str(entry_path.parent), read_only=True))
@@ -821,27 +1149,3 @@ def _official_overlay_submit_allowed(experiment: dict[str, Any] | None) -> bool:
         if item.get("allow_official_overlay_submit") is True or item.get("allow_submit_overlay") is True:
             return True
     return False
-
-
-def _digest_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _digest_directory(path: Path) -> str:
-    digest = hashlib.sha256()
-    for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
-        digest.update(file_path.relative_to(path).as_posix().encode("utf-8"))
-        with file_path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _size_bytes(path: Path) -> int:
-    if path.is_file():
-        return path.stat().st_size
-    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())

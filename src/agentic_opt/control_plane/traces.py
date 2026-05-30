@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from agentic_opt.common.atomic import atomic_write_text
+from agentic_opt.common.files import (
+    count_files as _count_files,
+    digest_directory as _digest_directory,
+    size_bytes as _size_bytes,
+)
 from agentic_opt.common.ids import make_run_id
 
 from .repository import ControlPlaneRepository
@@ -427,21 +432,3 @@ def _write_jsonl(path: Path, items: list[dict[str, Any]]) -> None:
 
 def _digest_bytes(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
-
-
-def _digest_directory(path: Path) -> str:
-    digest = hashlib.sha256()
-    for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
-        digest.update(file_path.relative_to(path).as_posix().encode("utf-8"))
-        with file_path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _count_files(path: Path) -> int:
-    return sum(1 for item in path.rglob("*") if item.is_file())
-
-
-def _size_bytes(path: Path) -> int:
-    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())

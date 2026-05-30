@@ -42,7 +42,6 @@ class PolicyService:
         policy = experiment.get("policy") if experiment else {}
         budget = experiment.get("budget") if experiment else {}
         job_policy = {**(policy.get("jobs") or {}), **(payload.get("policy") or {})}
-        provider = payload.get("provider") or "local"
         estimated = estimated_cost(payload)
 
         max_jobs = job_policy.get("max_jobs", budget.get("max_jobs"))
@@ -74,8 +73,6 @@ class PolicyService:
                 )
 
         requires_approval = bool(payload.get("requires_approval") or job_policy.get("require_approval"))
-        if provider not in {"local", "local-docker", "local-docker-strict", "docker_image"}:
-            requires_approval = bool(job_policy.get("require_provider_approval", True))
         if requires_approval and payload.get("approved"):
             return PolicyDecision(True, estimated_cost=estimated)
         if requires_approval:

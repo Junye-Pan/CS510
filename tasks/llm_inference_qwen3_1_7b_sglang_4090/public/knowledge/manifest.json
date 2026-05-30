@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "path": "baseline.md",
+      "title": "Near-parity starter baseline",
+      "description": "Public guidance for the initial candidate baseline and its expected score scale."
+    },
+    {
+      "path": "near_parity_public_seed/manifest.json",
+      "title": "Near-parity public seed manifest",
+      "description": "Read-only manifest snapshot for the public seed that scores near parity on the standard profile."
+    },
+    {
+      "path": "near_parity_public_seed/kernels/rmsnorm.py",
+      "title": "RMSNorm seed kernel",
+      "description": "Read-only public seed RMSNorm implementation."
+    },
+    {
+      "path": "near_parity_public_seed/kernels/fused_add_rmsnorm.py",
+      "title": "Fused add RMSNorm seed kernel",
+      "description": "Read-only public seed fused add RMSNorm implementation."
+    },
+    {
+      "path": "near_parity_public_seed/kernels/swiglu.py",
+      "title": "SwiGLU seed kernel",
+      "description": "Read-only public seed SwiGLU implementation."
+    },
+    {
+      "path": "near_parity_public_seed/kernels/attention_backend.py",
+      "title": "Attention backend seed",
+      "description": "Read-only public seed attention backend fallback implementation."
+    },
+    {
+      "path": "near_parity_public_seed/kernels/sampling_backend.py",
+      "title": "Sampling backend seed",
+      "description": "Read-only public seed sampling backend fallback implementation."
+    }
+  ]
+}

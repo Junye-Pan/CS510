@@ -30,7 +30,6 @@ _SHELL_ENV_SECRET_NAMES = (
     "CODEX_HOME",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
-    "RUNPOD_API_KEY",
     "HF_TOKEN",
     "HUGGINGFACE_HUB_TOKEN",
 )
@@ -42,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--api-url", required=True)
     parser.add_argument("--workspace-root", type=Path, required=True)
-    parser.add_argument("--codex-binary", default="codex")
+    parser.add_argument("--codex-binary", default=os.environ.get("AO_CODEX_BINARY") or os.environ.get("CODEX_BINARY") or "codex")
     parser.add_argument("--max-turn-wall-time-s", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -168,7 +167,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     adapter = AppServerCodexAdapter(
         client=app_client,
-        config=AppServerAdapterConfig(codex_binary=args.codex_binary, model="gpt-5.5", reasoning_effort="xhigh"),
+        config=AppServerAdapterConfig(
+            codex_binary=args.codex_binary,
+            model=_codex_model(workspace.env),
+            reasoning_effort=_codex_reasoning_effort(workspace.env),
+        ),
     )
     run_id = make_run_id(assignment["agent_id"])
     final_status = "completed"
@@ -184,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
                 workspace_root=str(workspace.root),
                 writable_roots=workspace.writable_roots,
                 readable_roots=workspace.readable_roots,
-                sandbox_mode=_worker_sandbox_mode(),
+                sandbox_mode=_worker_sandbox_mode(workspace.env),
                 # The semantic CLI talks to the control plane over localhost.
                 # Without App Server network access, ctx/eval/finding/notebook
                 # fail before a worker can report durable experiment state.
@@ -544,6 +547,16 @@ def _environment_default_exports(environment: dict) -> dict[str, str]:
     return {str(key): str(value) for key, value in raw.items() if key and value is not None}
 
 
+def _codex_model(env: dict[str, str]) -> str | None:
+    value = env.get("AO_CODEX_MODEL") or os.environ.get("AO_CODEX_MODEL")
+    return str(value).strip() if value else "gpt-5.5"
+
+
+def _codex_reasoning_effort(env: dict[str, str]) -> str | None:
+    value = env.get("AO_CODEX_REASONING_EFFORT") or os.environ.get("AO_CODEX_REASONING_EFFORT")
+    return str(value).strip() if value else "xhigh"
+
+
 def _container_runtime_env_override(runtime_env: PreparedRuntimeEnv) -> PreparedRuntimeEnv:
     python_override = os.environ.get("AO_WORKER_RUNTIME_PYTHON")
     if not python_override:
@@ -568,8 +581,16 @@ def _app_server_startup_timeout_s(max_turn_wall_time_s: int | None) -> float:
     return float(max(10, min(120, max_turn_wall_time_s)))
 
 
-def _worker_sandbox_mode() -> str:
-    if os.environ.get("AO_WORKER_RUNTIME_PYTHON"):
+def _worker_sandbox_mode(workspace_env: dict[str, str] | None = None) -> str:
+    explicit = (
+        os.environ.get("AO_CODEX_SANDBOX_MODE")
+        or os.environ.get("AO_WORKER_SANDBOX_MODE")
+        or (workspace_env or {}).get("AO_CODEX_SANDBOX_MODE")
+        or (workspace_env or {}).get("AO_WORKER_SANDBOX_MODE")
+    )
+    if explicit:
+        return explicit
+    if os.environ.get("AO_WORKER_RUNTIME_PYTHON") or (workspace_env or {}).get("AO_TASK_RUNTIME_PYTHON"):
         return "danger-full-access"
     return "workspace-write"
 

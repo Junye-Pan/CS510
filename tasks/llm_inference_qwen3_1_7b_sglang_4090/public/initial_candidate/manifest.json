@@ -1,0 +1,81 @@
+{
+  "schema": "agentic_opt.sglang_fixed_kernel_surface.v1",
+  "target": {
+    "model": "Qwen/Qwen3-1.7B",
+    "model_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+    "framework": "sglang",
+    "sglang_version": "0.4.6.post5",
+    "gpu": "RTX 4090",
+    "dtype": "bf16",
+    "kernel_language": "triton"
+  },
+  "integrations": [
+    {
+      "id": "rmsnorm_wrapper_h2048_h128_bf16",
+      "type": "operator_patch",
+      "domain": "norm",
+      "target": "sglang.srt.layers.layernorm.RMSNorm.forward_cuda",
+      "adapter_id": "rmsnorm",
+      "kernel_entry_points": {
+        "rmsnorm": "kernels/rmsnorm.py::run",
+        "fused_add_rmsnorm": "kernels/fused_add_rmsnorm.py::run"
+      },
+      "fallback": "original",
+      "shape_guard": {
+        "rmsnorm_hidden_sizes": [2048, 128],
+        "fused_add_hidden_sizes": [2048],
+        "dtype": "bfloat16",
+        "device": "cuda",
+        "residual_modes": ["none", "residual"]
+      }
+    },
+    {
+      "id": "swiglu_i6144_bf16",
+      "type": "operator_patch",
+      "domain": "mlp_activation",
+      "target": "sglang.srt.layers.activation.SiluAndMul.forward_cuda",
+      "adapter_id": "swiglu",
+      "kernel_entry_point": "kernels/swiglu.py::run",
+      "fallback": "original",
+      "shape_guard": {
+        "input_last_dim": 12288,
+        "output_last_dim": 6144,
+        "dtype": "bfloat16",
+        "device": "cuda"
+      }
+    },
+    {
+      "id": "attention_backend_bf16",
+      "type": "backend_registration",
+      "domain": "attention",
+      "backend_kind": "attention",
+      "backend_name": "ao_candidate_attention",
+      "adapter_id": "attention_backend",
+      "kernel_entry_point": "kernels/attention_backend.py::forward",
+      "fallback": {
+        "backend": "official_default"
+      },
+      "shape_guard": {
+        "layer_type": "qwen3_causal_attention",
+        "layer_ids": "0..27",
+        "head_dim": 128,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "dtype": "bfloat16",
+        "device": "cuda"
+      }
+    },
+    {
+      "id": "sampling_backend_top_p_bf16",
+      "type": "backend_registration",
+      "domain": "sampling",
+      "backend_kind": "sampling",
+      "backend_name": "ao_candidate_sampling",
+      "adapter_id": "sampling_backend",
+      "kernel_entry_point": "kernels/sampling_backend.py::sample",
+      "fallback": {
+        "backend": "official_default"
+      }
+    }
+  ]
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -20,7 +21,11 @@ from agentic_opt.control_plane.docker_runtime import (
 from agentic_opt.control_plane.process_env import build_subprocess_env
 from agentic_opt.control_plane.relay import relay_url, start_relay_process, tcp_relay_url
 from agentic_opt.control_plane.network_proxy import proxy_url, start_network_proxy_process, wait_for_unix_socket
-from agentic_opt.control_plane.repository import ControlPlaneRepository
+from agentic_opt.control_plane.repository import (
+    ACTIVE_EXPERIMENT_STATUSES,
+    TERMINAL_ASSIGNMENT_STATUSES,
+    ControlPlaneRepository,
+)
 from agentic_opt.control_plane.task_context import (
     append_docker_task_context_mount,
     docker_task_context_enforcement,
@@ -31,8 +36,9 @@ from agentic_opt.control_plane.traces import AgentTraceService
 
 DOCKER_WORKER_BACKENDS = {"docker", "docker_image", "local-docker", "local-docker-strict"}
 TERMINAL_SESSION_STATUSES = {"completed", "failed", "cancelled", "interrupted", "stopped", "blocked"}
-CONTINUABLE_ASSIGNMENT_STATUSES = {"completed", "stopped"}
+CONTINUABLE_ASSIGNMENT_STATUSES = {"running", "completed", "stopped"}
 CONTINUABLE_STOP_REASONS = {"turn_completed", "turn_timeout"}
+AUTO_CONTINUE_BLOCKING_EXPERIMENT_STATUSES = {"stopped", "cancelled", "interrupted", "blocked"}
 CONTAINER_CONTROL_PLANE_SOCKET_PATH = "/ao-control/control.sock"
 CONTAINER_OUTBOUND_PROXY_SOCKET_PATH = "/ao-network/proxy.sock"
 CONTAINER_OUTBOUND_PROXY_BRIDGE_PORT = 8765
@@ -51,6 +57,7 @@ class WorkerProcess:
     api_url: str = ""
     dry_run: bool = False
     max_turn_wall_time_s: int | None = None
+    codex_binary: str | None = None
     docker_container_name: str | None = None
 
 
@@ -91,6 +98,7 @@ class WorkerManager:
         api_url: str,
         dry_run: bool = False,
         max_turn_wall_time_s: int | None = None,
+        codex_binary: str | None = None,
     ) -> dict[str, Any]:
         self.default_api_url = api_url
         self.reap_finished_processes()
@@ -104,12 +112,21 @@ class WorkerManager:
         experiment = self.control.get_experiment(assignment["experiment_id"])
         if experiment is None:
             raise KeyError(assignment["experiment_id"])
+        max_turn_wall_time_s = _resolve_worker_max_turn_wall_time_s(
+            max_turn_wall_time_s,
+            assignment=assignment,
+        )
         session = self.control.create_session(
             {
                 "assignment_id": assignment_id,
                 "status": "starting",
                 "worker_backend": assignment["worker_backend"],
-                "details": {"api_url": api_url, "dry_run": dry_run},
+                "details": {
+                    "api_url": api_url,
+                    "dry_run": dry_run,
+                    "max_turn_wall_time_s": max_turn_wall_time_s,
+                    "codex_binary": codex_binary,
+                },
             }
         )
         workspace_root = self.state_root / "workspaces" / assignment_id / session["session_id"]
@@ -356,6 +373,8 @@ class WorkerManager:
                 cmd.append("--dry-run")
             if max_turn_wall_time_s is not None:
                 cmd.extend(["--max-turn-wall-time-s", str(max_turn_wall_time_s)])
+            if codex_binary:
+                cmd.extend(["--codex-binary", codex_binary])
         env = _worker_process_env(self.repo_root)
         env["AO_CONTROL_API_URL"] = worker_api_url
         env["AO_ASSIGNMENT_ID"] = assignment_id
@@ -372,6 +391,7 @@ class WorkerManager:
                     stdout=stdout,
                     stderr=stderr,
                     text=True,
+                    start_new_session=True,
                 )
         except Exception:
             _terminate_process(relay_process)
@@ -388,6 +408,7 @@ class WorkerManager:
                 api_url=api_url,
                 dry_run=dry_run,
                 max_turn_wall_time_s=max_turn_wall_time_s,
+                codex_binary=codex_binary,
                 docker_container_name=docker_container_name,
             )
         return self.control.update_session(
@@ -400,6 +421,8 @@ class WorkerManager:
                     "api_url": api_url,
                     "worker_api_url": worker_api_url,
                     "dry_run": dry_run,
+                    "max_turn_wall_time_s": max_turn_wall_time_s,
+                    "codex_binary": codex_binary,
                     "stdout_path": str(stdout_path),
                     "stderr_path": str(stderr_path),
                     **relay_details,
@@ -418,6 +441,8 @@ class WorkerManager:
             reaped = self._reap_worker_locked(assignment_id, worker)
             if reaped is not None:
                 summary = reaped
+            elif (stopped := self._stop_worker_if_control_requested_locked(worker)) is not None:
+                summary = stopped
             else:
                 return {
                     "assignment_id": worker.assignment_id,
@@ -438,6 +463,10 @@ class WorkerManager:
                 summary = self._reap_worker_locked(assignment_id, worker)
                 if summary is not None:
                     reaped.append(summary)
+                    continue
+                summary = self._stop_worker_if_control_requested_locked(worker)
+                if summary is not None:
+                    reaped.append(summary)
         for summary in reaped:
             continuation = self._maybe_continue_assignment(summary)
             if continuation is not None:
@@ -445,6 +474,65 @@ class WorkerManager:
         if not self._recovering_stale_sessions:
             reaped.extend(self.recover_stale_sessions())
         return reaped
+
+    def _stop_worker_if_control_requested_locked(self, worker: WorkerProcess) -> dict[str, Any] | None:
+        assignment = self.control.get_assignment(worker.assignment_id)
+        experiment = self.control.get_experiment(worker.experiment_id)
+        reason = _control_stop_reason_for_worker(assignment=assignment, experiment=experiment)
+        if reason is None:
+            return None
+
+        session = self.control.get_session(worker.session_id)
+        updated_session = session
+        stop_payload = {
+            "source": "worker_manager",
+            "reason": reason,
+            "assignment_status": (assignment or {}).get("status"),
+            "experiment_status": (experiment or {}).get("status"),
+            "pid": worker.process.pid,
+        }
+        if session is not None and session.get("status") not in TERMINAL_SESSION_STATUSES:
+            updated_session = self.control.update_session(
+                worker.session_id,
+                {
+                    "status": "stopped",
+                    "details": {
+                        "stop_reason": reason,
+                        "worker_stop": stop_payload,
+                    },
+                },
+            )
+        self.control.record_event(
+            {
+                "experiment_id": worker.experiment_id,
+                "assignment_id": worker.assignment_id,
+                "session_id": worker.session_id,
+                "task_id": (assignment or session or {}).get("task_id"),
+                "agent_id": (assignment or session or {}).get("agent_id"),
+                "event_type": "worker.stopped",
+                "summary": f"worker stopped: {reason}",
+                "payload": stop_payload,
+            }
+        )
+        _terminate_worker_process(worker)
+        _terminate_process(worker.relay_process)
+        _terminate_process(worker.proxy_process)
+        if self._assignment_processes.get(worker.assignment_id) is worker:
+            self._assignment_processes.pop(worker.assignment_id, None)
+        if updated_session is not None:
+            self._register_unregistered_session_traces(updated_session, outcome="worker_stopped", returncode=None)
+        return {
+            "assignment_id": worker.assignment_id,
+            "session_id": worker.session_id,
+            "experiment_id": worker.experiment_id,
+            "pid": worker.process.pid,
+            "status": "stopped",
+            "reason": reason,
+            "api_url": worker.api_url,
+            "dry_run": worker.dry_run,
+            "max_turn_wall_time_s": worker.max_turn_wall_time_s,
+            "codex_binary": worker.codex_binary,
+        }
 
     def recover_stale_sessions(self) -> list[dict[str, Any]]:
         if self._recovering_stale_sessions:
@@ -483,19 +571,25 @@ class WorkerManager:
             return self._recover_stale_active_session(assignment, session, age_s=age_s)
 
         session = sessions[0]
-        if session.get("status") not in {"completed", "stopped"}:
+        session_status = str(session.get("status") or "")
+        if session_status not in {"completed", "stopped", "failed"}:
             return None
-        if assignment.get("status") not in CONTINUABLE_ASSIGNMENT_STATUSES:
+        if assignment.get("status") not in (CONTINUABLE_ASSIGNMENT_STATUSES | {"failed"}):
             return None
         session_details = session.get("details") or {}
-        if session_details.get("stop_reason") not in CONTINUABLE_STOP_REASONS:
+        failed_session = session_status == "failed"
+        if not failed_session and session_details.get("stop_reason") not in CONTINUABLE_STOP_REASONS:
             return None
         return self._restart_assignment_from_session(
             assignment,
             session,
-            reason="unmanaged_terminal_session",
+            reason="unmanaged_failed_session" if failed_session else "unmanaged_terminal_session",
             event_type="assignment.auto_continue",
-            summary="worker session ended before evaluator budget was exhausted; starting another session",
+            summary=(
+                "worker session failed before evaluator budget was exhausted; starting another session"
+                if failed_session
+                else "worker session ended before evaluator budget was exhausted; starting another session"
+            ),
         )
 
     def _recover_stale_active_session(
@@ -557,6 +651,12 @@ class WorkerManager:
         metadata = assignment.get("metadata") or {}
         if metadata.get("global_stop_condition") or metadata.get("stop_condition") or metadata.get("auto_continue_disabled"):
             return None
+        if not self._experiment_allows_auto_continue(assignment):
+            return None
+        session_details = session.get("details") or {}
+        allow_stopped_assignment = session_details.get("stop_reason") in CONTINUABLE_STOP_REASONS
+        if assignment.get("status") == "stopped" and not allow_stopped_assignment:
+            return None
         budget_state = self._evaluator_budget_state(assignment)
         if not budget_state["has_budget"]:
             return None
@@ -584,7 +684,6 @@ class WorkerManager:
                 }
             )
             return None
-        session_details = session.get("details") or {}
         api_url = str(session_details.get("api_url") or self.default_api_url or "")
         if not api_url:
             self.control.record_event(
@@ -600,6 +699,15 @@ class WorkerManager:
                 }
             )
             return None
+        claimed = self._claim_auto_continuation(
+            assignment_id=str(assignment["assignment_id"]),
+            session_id=str(session["session_id"]),
+            reason=reason,
+            allow_stopped_assignment=allow_stopped_assignment,
+        )
+        if claimed is None:
+            return None
+        assignment = claimed
         self.control.update_experiment_status(
             assignment["experiment_id"],
             "running",
@@ -630,6 +738,7 @@ class WorkerManager:
             api_url=api_url,
             dry_run=bool(session_details.get("dry_run")),
             max_turn_wall_time_s=session_details.get("max_turn_wall_time_s"),
+            codex_binary=session_details.get("codex_binary") or os.environ.get("AO_CODEX_BINARY"),
         )
 
     def close(self) -> None:
@@ -667,21 +776,38 @@ class WorkerManager:
             "api_url": worker.api_url,
             "dry_run": worker.dry_run,
             "max_turn_wall_time_s": worker.max_turn_wall_time_s,
+            "codex_binary": worker.codex_binary,
         }
 
     def _maybe_continue_assignment(self, summary: dict[str, Any] | None) -> dict[str, Any] | None:
-        if not summary or summary.get("returncode") != 0:
+        if not summary:
             return None
+        returncode = summary.get("returncode")
         assignment_id = str(summary["assignment_id"])
         assignment = self.control.get_assignment(assignment_id)
         session = self.control.get_session(str(summary["session_id"]))
         if assignment is None or session is None:
             return None
-        if assignment.get("status") not in CONTINUABLE_ASSIGNMENT_STATUSES:
-            return None
         session_details = session.get("details") or {}
-        if session_details.get("stop_reason") not in CONTINUABLE_STOP_REASONS:
+        if not self._experiment_allows_auto_continue(assignment):
             return None
+        allow_stopped_assignment = session_details.get("stop_reason") in CONTINUABLE_STOP_REASONS
+        assignment_status = str(assignment.get("status") or "")
+        failed_session = returncode != 0 or session.get("status") == "failed"
+        if failed_session:
+            if assignment_status == "stopped" and not allow_stopped_assignment:
+                return None
+            if assignment_status not in (CONTINUABLE_ASSIGNMENT_STATUSES | {"failed"}):
+                return None
+            continuation_reason = "managed_failed_session"
+            continuation_summary = "worker failed before evaluator budget was exhausted; starting another session"
+        else:
+            if assignment_status not in CONTINUABLE_ASSIGNMENT_STATUSES:
+                return None
+            if session_details.get("stop_reason") not in CONTINUABLE_STOP_REASONS:
+                return None
+            continuation_reason = "managed_terminal_session"
+            continuation_summary = "worker completed before evaluator budget was exhausted; starting another session"
         metadata = assignment.get("metadata") or {}
         if metadata.get("global_stop_condition") or metadata.get("stop_condition") or metadata.get("auto_continue_disabled"):
             return None
@@ -713,6 +839,15 @@ class WorkerManager:
                 }
             )
             return None
+        claimed = self._claim_auto_continuation(
+            assignment_id=assignment_id,
+            session_id=str(session["session_id"]),
+            reason=continuation_reason,
+            allow_stopped_assignment=allow_stopped_assignment,
+        )
+        if claimed is None:
+            return None
+        assignment = claimed
 
         self.control.update_experiment_status(
             assignment["experiment_id"],
@@ -720,8 +855,10 @@ class WorkerManager:
             metadata={
                 "auto_continue": {
                     "source": "worker_reaper",
+                    "reason": continuation_reason,
                     "assignment_id": assignment_id,
                     "previous_session_id": session["session_id"],
+                    "returncode": returncode,
                     "budget": budget_state,
                 }
             },
@@ -734,8 +871,8 @@ class WorkerManager:
                 "task_id": assignment["task_id"],
                 "agent_id": assignment["agent_id"],
                 "event_type": "assignment.auto_continue",
-                "summary": "worker completed before evaluator budget was exhausted; starting another session",
-                "payload": budget_state,
+                "summary": continuation_summary,
+                "payload": {"reason": continuation_reason, "returncode": returncode, **budget_state},
             }
         )
         return self.start_control_assignment(
@@ -743,7 +880,49 @@ class WorkerManager:
             api_url=str(summary.get("api_url") or (session_details.get("api_url") or "")),
             dry_run=bool(summary.get("dry_run")),
             max_turn_wall_time_s=summary.get("max_turn_wall_time_s"),
+            codex_binary=summary.get("codex_binary") or session_details.get("codex_binary") or os.environ.get("AO_CODEX_BINARY"),
         )
+
+    def _claim_auto_continuation(
+        self,
+        *,
+        assignment_id: str,
+        session_id: str,
+        reason: str,
+        allow_stopped_assignment: bool = False,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            assignment = self.control.get_assignment(assignment_id)
+            if assignment is None:
+                return None
+            if not self._experiment_allows_auto_continue(assignment):
+                return None
+            if assignment.get("status") == "stopped" and not allow_stopped_assignment:
+                return None
+            metadata = assignment.get("metadata") or {}
+            claimed_sessions = [str(item) for item in metadata.get("auto_continue_claimed_sessions") or []]
+            if session_id in claimed_sessions:
+                return None
+            claimed_sessions.append(session_id)
+            claimed_sessions = claimed_sessions[-50:]
+            return self.control.update_assignment_status(
+                assignment_id,
+                "running",
+                metadata={
+                    "auto_continue_claimed_sessions": claimed_sessions,
+                    "auto_continue_claim": {
+                        "session_id": session_id,
+                        "reason": reason,
+                        "source": "worker_reaper",
+                    },
+                },
+            )
+
+    def _experiment_allows_auto_continue(self, assignment: dict[str, Any]) -> bool:
+        experiment = self.control.get_experiment(str(assignment["experiment_id"]))
+        if experiment is None:
+            return False
+        return str(experiment.get("status") or "") not in AUTO_CONTINUE_BLOCKING_EXPERIMENT_STATUSES
 
     def _evaluator_budget_state(self, assignment: dict[str, Any]) -> dict[str, Any]:
         experiment = self.control.get_experiment(assignment["experiment_id"])
@@ -875,21 +1054,15 @@ def _leaderboard_budget_used(
     experiment_id: str,
     assignment_id: str | None = None,
 ) -> int:
-    leaderboard_used = sum(
-        1
-        for entry in control.list_leaderboard_entries(experiment_id=experiment_id, limit=1_000_000)
-        if assignment_id is None or entry.get("assignment_id") == assignment_id
-    )
-    pending_used = sum(
+    return sum(
         1
         for evaluation in control.list_evaluations(experiment_id=experiment_id, assignment_id=assignment_id)
-        if _pending_evaluation_counts_toward_leaderboard_budget(evaluation)
+        if _evaluation_counts_toward_leaderboard_budget(evaluation)
     )
-    return leaderboard_used + pending_used
 
 
-def _pending_evaluation_counts_toward_leaderboard_budget(evaluation: dict[str, Any]) -> bool:
-    if evaluation.get("status") not in {"queued", "running"}:
+def _evaluation_counts_toward_leaderboard_budget(evaluation: dict[str, Any]) -> bool:
+    if evaluation.get("status") in {"cancelled", "stopped"}:
         return False
     request = evaluation.get("request") or {}
     kind = evaluation.get("kind") or request.get("kind")
@@ -902,6 +1075,34 @@ def _pending_evaluation_counts_toward_leaderboard_budget(evaluation: dict[str, A
     if request.get("replay") and request.get("publish_leaderboard") is not True:
         return False
     return True
+
+
+def _control_stop_reason_for_worker(
+    *,
+    assignment: dict[str, Any] | None,
+    experiment: dict[str, Any] | None,
+) -> str | None:
+    if assignment is not None:
+        assignment_status = str(assignment.get("status") or "")
+        assignment_metadata = assignment.get("metadata") or {}
+        if assignment_status in TERMINAL_ASSIGNMENT_STATUSES:
+            budget = assignment_metadata.get("budget_exhausted")
+            if isinstance(budget, dict) and budget.get("reason"):
+                return str(budget["reason"])
+            stop_condition = assignment_metadata.get("stop_condition") or assignment_metadata.get("global_stop_condition")
+            if isinstance(stop_condition, dict) and stop_condition.get("reason"):
+                return str(stop_condition["reason"])
+            return f"assignment_{assignment_status}"
+
+    if experiment is not None:
+        experiment_status = str(experiment.get("status") or "")
+        experiment_metadata = experiment.get("metadata") or {}
+        if experiment_status not in ACTIVE_EXPERIMENT_STATUSES:
+            budget = experiment_metadata.get("budget_exhausted")
+            if isinstance(budget, dict) and budget.get("reason"):
+                return str(budget["reason"])
+            return f"experiment_{experiment_status}"
+    return None
 
 
 def _session_age_s(session: dict[str, Any]) -> float:
@@ -942,6 +1143,21 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _resolve_worker_max_turn_wall_time_s(value: Any, *, assignment: dict[str, Any]) -> int | None:
+    """Resolve worker turn timeout, with assignment/env overrides for long evaluations."""
+    metadata = assignment.get("metadata") or {}
+    for source in (metadata.get("worker_options"), metadata.get("worker"), metadata):
+        if not isinstance(source, dict):
+            continue
+        override = _positive_int(source.get("max_turn_wall_time_s"))
+        if override is not None:
+            return override
+    env_override = _positive_int(os.environ.get("AO_WORKER_MAX_TURN_WALL_TIME_S"))
+    if env_override is not None:
+        return env_override
+    return _positive_int(value)
 
 
 def build_docker_worker_command(
@@ -1252,6 +1468,49 @@ def _terminate_process(process: subprocess.Popen[str] | None) -> None:
         process.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
         process.kill()
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _terminate_worker_process(worker: WorkerProcess) -> None:
+    if worker.docker_container_name:
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", worker.docker_container_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            pass
+    _terminate_process_group(worker.process)
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        try:
+            process.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        process.terminate()
+    try:
+        process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            process.kill()
         try:
             process.wait(timeout=2.0)
         except subprocess.TimeoutExpired:

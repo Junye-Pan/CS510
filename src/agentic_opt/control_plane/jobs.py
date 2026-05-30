@@ -25,7 +25,6 @@ from .policy import PolicyService, estimated_cost
 from .process_env import build_subprocess_env, sanitize_env
 from .network_proxy import proxy_url, start_network_proxy_process, wait_for_tcp
 from .repository import ControlPlaneRepository
-from .runpod_provider import RunPodCapacityError, RunPodProvider
 from .task_context import (
     TaskContextMountConflictError,
     append_docker_task_context_mount,
@@ -37,14 +36,14 @@ from .task_context import (
 
 TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "blocked"}
 DOCKER_JOB_PROVIDERS = {"local-docker", "local-docker-strict", "docker_image"}
+SUPPORTED_JOB_PROVIDERS = {"local", *DOCKER_JOB_PROVIDERS}
 
 
 class JobService:
     """Server-owned durable job launcher.
 
-    This is the first provider-independent layer for compute jobs. The initial
-    provider is local subprocess execution; cloud providers should implement the
-    same resource contract instead of adding worker-specific launch code.
+    This is the provider-independent layer for compute jobs. Active providers
+    are local subprocess execution and local Docker-backed execution.
     """
 
     def __init__(
@@ -78,6 +77,24 @@ class JobService:
             self._reaper_thread.start()
 
     def launch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        provider = payload.get("provider") or "local"
+        if provider not in SUPPORTED_JOB_PROVIDERS:
+            return self.repository.create_job(
+                {
+                    **payload,
+                    "provider": provider,
+                    "status": "blocked",
+                    "cost": estimated_cost(payload),
+                    "details": {
+                        **(payload.get("details") or {}),
+                        "policy_block": {
+                            "reason": "unsupported_provider",
+                            "provider": provider,
+                            "supported_providers": sorted(SUPPORTED_JOB_PROVIDERS),
+                        },
+                    },
+                }
+            )
         decision = self.policy.decide_job(payload)
         if not decision.allowed:
             return self.repository.create_job(
@@ -94,47 +111,9 @@ class JobService:
             "cost": decision.estimated_cost or estimated_cost(payload),
             "details": {**(payload.get("details") or {}), "policy_decision": decision.to_dict()},
         }
-        provider = payload.get("provider") or "local"
-        if provider == "runpod":
-            return self.launch_runpod(payload)
         if provider in DOCKER_JOB_PROVIDERS:
             return self.launch_local_docker(payload)
-        if provider != "local":
-            return self.repository.create_job({**payload, "provider": provider, "status": payload.get("status") or "queued"})
         return self.launch_local(payload)
-
-    def launch_runpod(self, payload: dict[str, Any]) -> dict[str, Any]:
-        preview: dict[str, Any] | None = None
-        try:
-            preview = self.repository.create_job({**payload, "provider": "runpod", "status": "queued"})
-            result = RunPodProvider().launch({**payload, "job_id": preview["job_id"]})
-            return self.repository.update_job(
-                preview["job_id"],
-                {
-                    "status": "running" if not result.dry_run else "queued",
-                    "outputs": {"pod_id": result.pod_id},
-                    "details": {
-                        **(preview.get("details") or {}),
-                        "runpod": {
-                            "pod_id": result.pod_id,
-                            "payload": result.payload,
-                            "response": result.response,
-                            "dry_run": result.dry_run,
-                        },
-                    },
-                },
-            )
-        except RunPodCapacityError as exc:
-            if preview is not None:
-                return self.repository.update_job(
-                    preview["job_id"],
-                    {"status": "blocked", "details": {"provider_error": {"type": "capacity", "message": str(exc), "retryable": True}}},
-                )
-            return self.repository.create_job({**payload, "provider": "runpod", "status": "blocked", "details": {"provider_error": {"type": "capacity", "message": str(exc), "retryable": True}}})
-        except Exception as exc:
-            if preview is not None:
-                return self.repository.update_job(preview["job_id"], {"status": "failed", "details": {"provider_error": {"type": type(exc).__name__, "message": str(exc), "retryable": False}}})
-            raise
 
     def launch_local_docker(self, payload: dict[str, Any]) -> dict[str, Any]:
         inputs = dict(payload.get("inputs") or {})
@@ -564,8 +543,8 @@ class JobService:
         record = self.repository.get_job(job_id)
         if record is None:
             raise KeyError(job_id)
-        if record["provider"] == "runpod":
-            record = self._refresh_runpod_status(record)
+        if record["provider"] == "local" and record["status"] in TERMINAL_JOB_STATUSES:
+            record = self._ensure_terminal_task_context_postcheck(record)
         if record["status"] in TERMINAL_JOB_STATUSES:
             self._cleanup_job_relay(job_id)
         return record
@@ -659,6 +638,27 @@ class JobService:
         )
         return {"job": updated, "attachment": attachments[-1]}
 
+    def _ensure_terminal_task_context_postcheck(self, record: dict[str, Any]) -> dict[str, Any]:
+        details = record.get("details") or {}
+        if details.get("task_context_postcheck") is not None:
+            return record
+        task_context_check = _verify_job_task_context(repository=self.repository, record=record)
+        if task_context_check is None:
+            return record
+        final_status = record["status"]
+        if final_status == "completed" and not task_context_check.get("ok", False):
+            final_status = "failed"
+        return self.repository.update_job(
+            record["job_id"],
+            {
+                "status": final_status,
+                "details": {
+                    **details,
+                    "task_context_postcheck": task_context_check,
+                },
+            },
+        )
+
     def cancel(self, job_id: str) -> dict[str, Any]:
         record = self.get(job_id)
         if record["status"] in TERMINAL_JOB_STATUSES:
@@ -669,13 +669,6 @@ class JobService:
                 os.kill(int(pid), signal.SIGTERM)
             except ProcessLookupError:
                 pass
-        if record["provider"] == "runpod":
-            pod_id = ((record.get("details") or {}).get("runpod") or {}).get("pod_id") or (record.get("outputs") or {}).get("pod_id")
-            if pod_id:
-                try:
-                    RunPodProvider().stop(str(pod_id))
-                except Exception as exc:
-                    return self.repository.update_job(job_id, {"status": "cancelled", "details": {"cancel_error": str(exc)}})
         self._cleanup_job_relay(job_id)
         return self.repository.update_job(job_id, {"status": "cancelled"})
 
@@ -772,27 +765,6 @@ class JobService:
                 self.reap_finished_processes()
             except Exception:
                 continue
-
-    def _refresh_runpod_status(self, record: dict[str, Any]) -> dict[str, Any]:
-        runpod = (record.get("details") or {}).get("runpod") or {}
-        pod_id = runpod.get("pod_id") or (record.get("outputs") or {}).get("pod_id")
-        if not pod_id or runpod.get("dry_run"):
-            return record
-        try:
-            status = RunPodProvider().status(str(pod_id))
-        except Exception as exc:
-            return self.repository.update_job(record["job_id"], {"details": {"runpod_status_error": str(exc)}})
-        normalized = str(status.get("status") or status.get("desiredStatus") or status.get("runtimeStatus") or "").lower()
-        terminal = {
-            "exited": "completed",
-            "terminated": "cancelled",
-            "stopped": "cancelled",
-            "failed": "failed",
-        }
-        updates: dict[str, Any] = {"details": {"runpod_status": status}}
-        if normalized in terminal:
-            updates["status"] = terminal[normalized]
-        return self.repository.update_job(record["job_id"], updates)
 
     def _cleanup_job_relay(self, job_id: str) -> None:
         with self._lock:

@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 ALLOWED_METHODS = {"GET", "POST", "PATCH"}
 ALLOWED_PATH_PREFIXES = ("/api/v1/", "/healthz")
 DEFAULT_MAX_BODY_BYTES = 25 * 1024 * 1024
+DEFAULT_TARGET_TIMEOUT_S = 900.0
 
 
 def relay_url(socket_path: Path) -> str:
@@ -40,6 +41,7 @@ def start_relay_process(
     transport: str = "unix-socket",
     tcp_host: str = "127.0.0.1",
     tcp_port: int | None = None,
+    target_timeout_s: float | None = None,
 ) -> subprocess.Popen[str]:
     command = [
         python_path or sys.executable,
@@ -60,6 +62,8 @@ def start_relay_process(
         command.extend(["--socket", str(socket_path)])
     if audit_log_path is not None:
         command.extend(["--audit-log", str(audit_log_path)])
+    if target_timeout_s is not None:
+        command.extend(["--target-timeout-s", str(float(target_timeout_s))])
     return subprocess.Popen(
         command,
         stdout=subprocess.DEVNULL,
@@ -79,11 +83,13 @@ class ControlPlaneRelayServer(ThreadingUnixStreamServer):
         target_url: str,
         *,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+        target_timeout_s: float = DEFAULT_TARGET_TIMEOUT_S,
         audit_log_path: Path | None = None,
     ) -> None:
         self.socket_path = socket_path.resolve()
         self.target_url = target_url.rstrip("/")
         self.max_body_bytes = max_body_bytes
+        self.target_timeout_s = float(target_timeout_s)
         self.audit_log_path = audit_log_path.resolve() if audit_log_path is not None else None
         self._audit_lock = threading.Lock()
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,10 +134,12 @@ class ControlPlaneTCPRelayServer(ThreadingHTTPServer):
         target_url: str,
         *,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+        target_timeout_s: float = DEFAULT_TARGET_TIMEOUT_S,
         audit_log_path: Path | None = None,
     ) -> None:
         self.target_url = target_url.rstrip("/")
         self.max_body_bytes = max_body_bytes
+        self.target_timeout_s = float(target_timeout_s)
         self.audit_log_path = audit_log_path.resolve() if audit_log_path is not None else None
         self._audit_lock = threading.Lock()
         if self.audit_log_path is not None:
@@ -198,7 +206,7 @@ class ControlPlaneRelayHandler(BaseHTTPRequestHandler):
         }
         request = Request(target, data=body, method=self.command, headers=headers)
         try:
-            with urlopen(request, timeout=120.0) as response:
+            with urlopen(request, timeout=self.server.target_timeout_s) as response:
                 raw = response.read()
                 status = response.status
                 content_type = response.headers.get("Content-Type") or "application/json"
@@ -264,6 +272,7 @@ def serve(
     socket_path: Path | None = None,
     target_url: str,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+    target_timeout_s: float = DEFAULT_TARGET_TIMEOUT_S,
     audit_log_path: Path | None = None,
     tcp_host: str | None = None,
     tcp_port: int | None = None,
@@ -275,6 +284,7 @@ def serve(
             (tcp_host, tcp_port),
             target_url,
             max_body_bytes=max_body_bytes,
+            target_timeout_s=target_timeout_s,
             audit_log_path=audit_log_path,
         )
     else:
@@ -284,6 +294,7 @@ def serve(
             socket_path,
             target_url,
             max_body_bytes=max_body_bytes,
+            target_timeout_s=target_timeout_s,
             audit_log_path=audit_log_path,
         )
     with server:
@@ -297,6 +308,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tcp-port", type=int)
     parser.add_argument("--target-url", required=True)
     parser.add_argument("--max-body-bytes", type=int, default=DEFAULT_MAX_BODY_BYTES)
+    parser.add_argument(
+        "--target-timeout-s",
+        type=float,
+        default=float(os.environ.get("AO_CONTROL_RELAY_TARGET_TIMEOUT_S", DEFAULT_TARGET_TIMEOUT_S)),
+    )
     parser.add_argument("--audit-log", type=Path)
     return parser
 
@@ -307,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         socket_path=args.socket,
         target_url=args.target_url,
         max_body_bytes=args.max_body_bytes,
+        target_timeout_s=args.target_timeout_s,
         audit_log_path=args.audit_log,
         tcp_host=args.tcp_host,
         tcp_port=args.tcp_port,

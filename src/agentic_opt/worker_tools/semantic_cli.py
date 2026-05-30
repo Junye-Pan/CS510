@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from agentic_opt.common.atomic import atomic_write_text
-from agentic_opt.control_plane.client import ControlPlaneClient
+from agentic_opt.common.ids import make_run_id
+from agentic_opt.control_plane.client import ControlPlaneClient, ControlPlaneClientError
 
 
 def _env(name: str, default: str | None = None) -> str:
@@ -20,6 +21,13 @@ def _env(name: str, default: str | None = None) -> str:
 
 def _client(args: argparse.Namespace) -> ControlPlaneClient:
     return ControlPlaneClient(args.api_url or _env("AO_CONTROL_API_URL"))
+
+
+def _agent_jobs_enabled() -> bool:
+    raw = os.environ.get("AO_AGENT_JOBS_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
 
 
 def _attempt_id_arg(args: argparse.Namespace) -> str | None:
@@ -221,9 +229,20 @@ def _ctx_workspace_reference(args: argparse.Namespace) -> dict[str, Any]:
     if command == "evaluations":
         return _workspace_reference("evaluations", directories=["history/evaluations"])
     if command == "attempts":
-        return _workspace_reference("attempts", directories=["history/attempts"], status=getattr(args, "status", None))
+        return _workspace_reference(
+            "attempts",
+            files=["history/attempts/index.jsonl", "history/current_assignment/attempts/index.jsonl"],
+            directories=["history/attempts", "history/current_assignment/attempts"],
+            status=getattr(args, "status", None),
+            scope="experiment-wide by default; current assignment subset under history/current_assignment",
+        )
     if command == "artifacts":
-        return _workspace_reference("artifacts", directories=["history/artifacts", "artifacts"])
+        return _workspace_reference(
+            "artifacts",
+            files=["history/artifacts/index.jsonl", "history/current_assignment/artifacts/index.jsonl"],
+            directories=["history/artifacts", "history/current_assignment/artifacts", "artifacts"],
+            scope="experiment-wide by default; current assignment subset under history/current_assignment",
+        )
     if command == "jobs":
         return _workspace_reference("jobs", directories=["history/jobs"])
     if command == "environments":
@@ -263,6 +282,7 @@ def command_artifact(args: argparse.Namespace) -> int:
                     "experiment_id": _env("AO_EXPERIMENT_ID"),
                     "assignment_id": _env("AO_ASSIGNMENT_ID"),
                     "attempt_id": _attempt_id_arg(args),
+                    "task_id": os.environ.get("AO_TASK_ID"),
                     "kind": args.kind,
                     "path": str(path),
                     "metadata": {"note": args.note} if args.note else {},
@@ -271,6 +291,16 @@ def command_artifact(args: argparse.Namespace) -> int:
         )
     elif args.artifact_command == "list":
         _emit(client.get("/api/v1/artifacts", {"assignment_id": _env("AO_ASSIGNMENT_ID"), "attempt_id": _attempt_id_arg(args)}))
+    elif args.artifact_command == "checkout":
+        _emit(
+            client.post(
+                f"/api/v1/artifacts/{args.artifact_id}/checkout",
+                {
+                    "destination_path": str(Path(args.destination).resolve()),
+                    "force": args.force,
+                },
+            )
+        )
     elif args.artifact_command == "checkout-incumbent":
         _emit(
             client.post(
@@ -299,6 +329,7 @@ def command_eval(args: argparse.Namespace) -> int:
         return 0
     kind = {"verify": "verify", "probe": "probe", "submit": "submit"}[args.eval_command]
     payload = {
+        "evaluation_id": make_run_id("eval"),
         "experiment_id": _env("AO_EXPERIMENT_ID"),
         "assignment_id": _env("AO_ASSIGNMENT_ID"),
         "task_id": args.task_id or _env("AO_TASK_ID"),
@@ -311,16 +342,59 @@ def command_eval(args: argparse.Namespace) -> int:
         payload["entry_path"] = str(Path(args.entry).resolve())
     if getattr(args, "artifact_id", None):
         payload["artifact_id"] = args.artifact_id
-    if getattr(args, "sync", False):
-        payload["async"] = False
-    if getattr(args, "run_async", False):
+    jobs_enabled = _agent_jobs_enabled()
+    wait_for_result = _eval_should_wait_for_result(args, kind)
+    if not jobs_enabled:
+        # AO_AGENT_JOBS_ENABLED gates arbitrary worker-launched jobs, not
+        # server-owned evaluations. Run evaluations asynchronously on the
+        # control plane and poll them so long official submits do not hold a
+        # single relay HTTP request open until it times out.
+        payload["async"] = True
+        wait_for_result = not bool(getattr(args, "run_async", False))
+    elif wait_for_result or getattr(args, "run_async", False):
         payload["async"] = True
     if getattr(args, "environment_id", None):
         payload["environment_id"] = args.environment_id
     if getattr(args, "environment_overlay_id", None):
         payload["environment_overlay_id"] = args.environment_overlay_id
-    _emit(_evaluation_location(client.post("/api/v1/evaluations", payload)))
+    record = _create_evaluation_with_reconcile(client, payload)
+    if wait_for_result:
+        record = _wait_for_status(client, f"/api/v1/evaluations/{record['evaluation_id']}", _eval_wait_timeout_s(args))
+    _emit(_evaluation_location(record))
     return 0
+
+
+def _create_evaluation_with_reconcile(client: ControlPlaneClient, payload: dict[str, Any]) -> dict[str, Any]:
+    evaluation_id = str(payload["evaluation_id"])
+    try:
+        return client.post("/api/v1/evaluations", payload)
+    except (ControlPlaneClientError, OSError, TimeoutError) as exc:
+        reconciled = _reconcile_created_evaluation(client, evaluation_id)
+        if reconciled is not None:
+            record = dict(reconciled)
+            notes = list(record.get("client_notes") or [])
+            notes.append(
+                {
+                    "source": "semantic_cli",
+                    "event": "evaluation_create_reconciled_after_post_error",
+                    "error": str(exc),
+                }
+            )
+            record["client_notes"] = notes
+            return record
+        raise
+
+
+def _reconcile_created_evaluation(client: ControlPlaneClient, evaluation_id: str) -> dict[str, Any] | None:
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        try:
+            return client.get(f"/api/v1/evaluations/{evaluation_id}")
+        except ControlPlaneClientError as exc:
+            if "evaluation not found" not in str(exc):
+                raise
+        time.sleep(0.25)
+    return None
 
 
 def command_finding(args: argparse.Namespace) -> int:
@@ -380,6 +454,8 @@ def command_notebook(args: argparse.Namespace) -> int:
 
 
 def command_job(args: argparse.Namespace) -> int:
+    if not _agent_jobs_enabled():
+        raise ValueError("durable agent jobs are disabled for optimization workers")
     if args.job_command == "list" and _workspace_root() is not None:
         _emit(_workspace_reference("jobs", directories=["history/jobs"], attempt_id=_attempt_id_arg(args)))
         return 0
@@ -407,14 +483,6 @@ def command_job(args: argparse.Namespace) -> int:
         if args.requires_control_plane:
             payload["requires_control_plane"] = True
             payload["control_plane_url"] = _env("AO_CONTROL_API_URL")
-        if args.template_id:
-            payload["template_id"] = args.template_id
-        if args.gpu_type_id:
-            payload["gpu_type_ids"] = args.gpu_type_id
-        if args.gpu_count is not None:
-            payload["gpu_count"] = args.gpu_count
-        if args.dry_run:
-            payload["dry_run"] = True
         if args.env:
             payload["env"] = _parse_key_values(args.env)
         if args.requires_approval:
@@ -945,6 +1013,22 @@ def _wait_for_status(client: ControlPlaneClient, path: str, timeout_s: float) ->
     return {"status": "timeout", "last": last}
 
 
+def _eval_should_wait_for_result(args: argparse.Namespace, kind: str) -> bool:
+    if getattr(args, "run_async", False):
+        return False
+    return bool(getattr(args, "sync", False) or kind in {"verify", "probe"})
+
+
+def _eval_wait_timeout_s(args: argparse.Namespace) -> float:
+    explicit = getattr(args, "timeout_s", None)
+    if explicit is not None:
+        return float(explicit)
+    raw = os.environ.get("AO_EVAL_WAIT_TIMEOUT_S")
+    if raw:
+        return float(raw)
+    return 1800.0
+
+
 def _parse_json_arg(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}
@@ -1024,6 +1108,10 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--attempt-id")
     artifact_list = artifact_sub.add_parser("list")
     artifact_list.add_argument("--attempt-id")
+    artifact_checkout = artifact_sub.add_parser("checkout")
+    artifact_checkout.add_argument("--artifact-id", required=True)
+    artifact_checkout.add_argument("--destination", required=True)
+    artifact_checkout.add_argument("--force", action="store_true")
     checkout = artifact_sub.add_parser("checkout-incumbent")
     checkout.add_argument("--destination", required=True)
     checkout.add_argument("--direction-id")
@@ -1042,6 +1130,7 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("--attempt-id")
         item.add_argument("--sync", action="store_true")
         item.add_argument("--async", dest="run_async", action="store_true")
+        item.add_argument("--timeout-s", type=float)
     probe = eval_sub.add_parser("probe")
     probe.add_argument("--entry")
     probe.add_argument("--artifact-id")
@@ -1051,6 +1140,7 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--kind", default="diagnostics")
     probe.add_argument("--sync", action="store_true")
     probe.add_argument("--async", dest="run_async", action="store_true")
+    probe.add_argument("--timeout-s", type=float)
     eval_status = eval_sub.add_parser("status")
     eval_status.add_argument("evaluation_id")
     eval_wait = eval_sub.add_parser("wait")
@@ -1090,12 +1180,8 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--environment-overlay-id")
     create.add_argument("--network-mode")
     create.add_argument("--requires-control-plane", action="store_true")
-    create.add_argument("--template-id")
-    create.add_argument("--gpu-type-id", action="append")
-    create.add_argument("--gpu-count", type=int)
     create.add_argument("--env", action="append")
     create.add_argument("--attempt-id")
-    create.add_argument("--dry-run", action="store_true")
     create.add_argument("--requires-approval", action="store_true")
     create.add_argument("--approved", action="store_true")
     create.add_argument("--estimated-cost-usd", type=float)

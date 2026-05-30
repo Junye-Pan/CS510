@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from agentic_opt.common.atomic import atomic_write_text
+from agentic_opt.common.files import (
+    count_files as _count_files,
+    digest_directory as _digest_directory,
+    digest_file as _digest_file,
+    size_bytes as _size_bytes,
+)
 from agentic_opt.common.ids import make_run_id
 from agentic_opt.task_api import candidate_spec_for
 from agentic_opt.task_registry import get_task
@@ -16,7 +22,6 @@ from agentic_opt.task_registry import get_task
 from .environments import EnvironmentService
 from .evaluation import EvaluationService
 from .jobs import JobService
-from .object_store import S3CompatibleObjectStore
 from .repository import ControlPlaneRepository
 from .task_context import ensure_task_context_snapshot
 from .telemetry import TelemetryService
@@ -56,7 +61,7 @@ def task_contract(task_id: str) -> dict[str, Any]:
             "operation": "submit",
             "entry_path_field": "entry_path",
             "server_owned": True,
-            "async_default": True,
+            "async_default": False,
         },
         "runtime_policy": task.runtime_spec.to_jsonable(),
         "artifact_policy": {
@@ -290,6 +295,13 @@ class ControlPlaneService:
         if not source.exists():
             raise FileNotFoundError(source)
         kind = payload.get("kind") or ("directory" if source.is_dir() else "file")
+        metadata = dict(payload.get("metadata") or {})
+        task_id = payload.get("task_id")
+        if not task_id and payload.get("assignment_id"):
+            assignment = self.repository.get_assignment(str(payload["assignment_id"]))
+            task_id = (assignment or {}).get("task_id")
+        if task_id:
+            metadata.setdefault("task_id", str(task_id))
         artifact_id = payload.get("artifact_id") or make_run_id("artifact")
         artifact_dir = self.artifact_root / artifact_id
         if artifact_dir.exists():
@@ -313,17 +325,12 @@ class ControlPlaneService:
         storage_provider = payload.get("storage_provider") or payload.get("artifact_store") or "local"
         remote_metadata: dict[str, Any] = {}
         artifact_uri = content_path.as_uri()
-        if storage_provider == "s3":
-            stored = S3CompatibleObjectStore(
-                bucket=payload.get("bucket"),
-                prefix=payload.get("prefix"),
-                endpoint_url=payload.get("endpoint_url"),
-                region_name=payload.get("region_name"),
-            ).upload_path(source=content_path, artifact_id=artifact_id)
-            artifact_uri = stored.uri
-            remote_metadata = {"remote": stored.metadata}
-        elif storage_provider != "local":
-            raise ValueError(f"unknown artifact storage_provider: {storage_provider}")
+        if storage_provider != "local":
+            raise ValueError(f"unsupported artifact storage_provider: {storage_provider}; only local is supported")
+        if source.is_dir() and not metadata.get("entry_relative_path"):
+            entry_relative_path = _infer_artifact_entry_relative_path(content_path, task_id=task_id)
+            if entry_relative_path:
+                metadata["entry_relative_path"] = entry_relative_path
         manifest = {
             "artifact_id": artifact_id,
             "kind": kind,
@@ -334,7 +341,7 @@ class ControlPlaneService:
             "digest": digest,
             "size_bytes": size_bytes,
             "file_count": file_count,
-            "metadata": {**(payload.get("metadata") or {}), **remote_metadata},
+            "metadata": {**metadata, **remote_metadata},
         }
         atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         record = self.repository.create_artifact(
@@ -348,7 +355,7 @@ class ControlPlaneService:
                 "local_path": str(content_path),
                 "digest": digest,
                 "metadata": {
-                    **(payload.get("metadata") or {}),
+                    **metadata,
                     **remote_metadata,
                     "storage_provider": storage_provider,
                     "source_path": str(source),
@@ -809,6 +816,26 @@ class ControlPlaneService:
             "entry_relative_path": (artifact.get("metadata") or {}).get("entry_relative_path"),
         }
 
+    def checkout_artifact(self, artifact_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        artifact = self.repository.get_artifact(artifact_id)
+        if artifact is None:
+            raise KeyError(artifact_id)
+        local_path = artifact.get("local_path")
+        if not local_path:
+            raise ValueError(f"artifact has no local_path: {artifact_id}")
+        destination = Path(payload["destination_path"]).resolve()
+        _copy_materialized_path(
+            source=Path(str(local_path)).resolve(),
+            destination=destination,
+            force=bool(payload.get("force")),
+            read_only=bool(payload.get("read_only", False)),
+        )
+        return {
+            "artifact": artifact,
+            "destination_path": str(destination),
+            "entry_relative_path": (artifact.get("metadata") or {}).get("entry_relative_path"),
+        }
+
     def context_for_assignment(self, assignment_id: str) -> dict[str, Any]:
         context = _worker_visible_context(self.repository.context_for_assignment(assignment_id))
         assignment = context["assignment"]
@@ -890,9 +917,30 @@ class ControlPlaneService:
         spec = candidate_spec_for(task)
         entry_path = Path(payload.get("entry_path") or (workspace_root / spec.workspace_entrypoint)).resolve()
         workspace_root.mkdir(parents=True, exist_ok=True)
-        seed = self.resolve_workspace_seed(assignment_id)
+        seed = self.resolve_workspace_seed(assignment_id, current_session_id=payload.get("session_id"))
         seed_materialized = dict(seed)
-        if seed.get("artifact_id"):
+        if seed.get("source_path"):
+            try:
+                _materialize_candidate_workspace_source(
+                    seed=seed,
+                    workspace_root=workspace_root,
+                    entry_path=entry_path,
+                )
+                seed_materialized = {
+                    **seed_materialized,
+                    "materialized": True,
+                    "destination_path": str(entry_path),
+                }
+            except Exception as exc:
+                seed_materialized = {
+                    "kind": "public_seed",
+                    "source": "fallback",
+                    "reason": f"workspace candidate seed failed: {exc}",
+                    "materialized": False,
+                    "destination_path": str(entry_path),
+                    "fallback_seed": seed,
+                }
+        elif seed.get("artifact_id"):
             artifact = self.repository.get_artifact(str(seed["artifact_id"]))
             if artifact is None:
                 seed_materialized = {
@@ -964,7 +1012,7 @@ class ControlPlaneService:
         )
         return bootstrap
 
-    def resolve_workspace_seed(self, assignment_id: str) -> dict[str, Any]:
+    def resolve_workspace_seed(self, assignment_id: str, *, current_session_id: str | None = None) -> dict[str, Any]:
         assignment = self.repository.get_assignment(assignment_id)
         if assignment is None:
             raise KeyError(assignment_id)
@@ -980,6 +1028,7 @@ class ControlPlaneService:
             }
         mode = str(seed_policy.get("mode") or "auto")
         experiment_id = assignment["experiment_id"]
+        experiment = self.repository.get_experiment(experiment_id)
         direction_id = assignment.get("direction_id")
         fallbacks: list[dict[str, Any]] = []
         if mode in {"public_seed", "public", "fresh"}:
@@ -988,6 +1037,37 @@ class ControlPlaneService:
                 "source": "assignment_workspace_seed",
                 "reason": f"workspace_seed mode is {mode}",
             }
+        if _resume_from_latest_assignment_candidate_enabled(
+            assignment=assignment,
+            experiment=experiment,
+            seed_policy=seed_policy,
+            mode=mode,
+        ):
+            latest_workspace_candidate = _latest_assignment_workspace_candidate(
+                repository=self.repository,
+                assignment=assignment,
+                current_session_id=current_session_id,
+            )
+            if latest_workspace_candidate is not None:
+                return {
+                    "kind": "latest_session_workspace_candidate",
+                    "source": "assignment_workspace_history",
+                    "reason": "resume_from_latest_assignment_candidate enabled",
+                    **latest_workspace_candidate,
+                }
+            fallbacks.append({"kind": "latest_session_workspace_candidate", "reason": "no workspace candidate"})
+            latest_candidate = _latest_assignment_candidate_artifact(
+                repository=self.repository,
+                assignment_id=assignment_id,
+            )
+            if latest_candidate is not None:
+                return {
+                    "kind": "latest_assignment_candidate",
+                    "source": "assignment_history",
+                    "artifact_id": latest_candidate["artifact_id"],
+                    "reason": "resume_from_latest_assignment_candidate enabled",
+                }
+            fallbacks.append({"kind": "latest_assignment_candidate", "reason": "no candidate artifact"})
         if direction_id and mode not in {"global_incumbent", "global"}:
             direction_incumbent = self.repository.get_incumbent(experiment_id=experiment_id, direction_id=direction_id)
             if direction_incumbent is not None and direction_incumbent.get("artifact_id"):
@@ -1164,6 +1244,98 @@ def _direction_plan_for_experiment(experiment: dict[str, Any]) -> list[dict[str,
 def _safe_token(raw: str) -> str:
     token = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
     return token or "item"
+
+
+def _resume_from_latest_assignment_candidate_enabled(
+    *,
+    assignment: dict[str, Any],
+    experiment: dict[str, Any] | None,
+    seed_policy: dict[str, Any],
+    mode: str,
+) -> bool:
+    if mode in {"latest_assignment_candidate", "latest_candidate", "resume_latest"}:
+        return True
+    if seed_policy.get("resume_from_latest_assignment_candidate") is not None:
+        return bool(seed_policy.get("resume_from_latest_assignment_candidate"))
+    metadata = assignment.get("metadata") or {}
+    if metadata.get("resume_from_latest_assignment_candidate") is not None:
+        return bool(metadata.get("resume_from_latest_assignment_candidate"))
+    config = (experiment or {}).get("config") or {}
+    optimization = config.get("optimization") or {}
+    return bool(optimization.get("resume_from_latest_assignment_candidate"))
+
+
+def _latest_assignment_candidate_artifact(
+    *,
+    repository: ControlPlaneRepository,
+    assignment_id: str,
+) -> dict[str, Any] | None:
+    for artifact in repository.list_artifacts(assignment_id=assignment_id):
+        if artifact.get("kind") != "candidate":
+            continue
+        local_path = artifact.get("local_path")
+        if local_path and Path(str(local_path)).exists():
+            return artifact
+    return None
+
+
+def _latest_assignment_workspace_candidate(
+    *,
+    repository: ControlPlaneRepository,
+    assignment: dict[str, Any],
+    current_session_id: str | None,
+) -> dict[str, Any] | None:
+    try:
+        task = get_task(str(assignment["task_id"]))
+        spec = candidate_spec_for(task)
+    except Exception:
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    for session in repository.list_sessions(assignment_id=str(assignment["assignment_id"])):
+        if current_session_id and session.get("session_id") == current_session_id:
+            continue
+        workspace_path = session.get("workspace_path")
+        if not workspace_path:
+            continue
+        workspace_root = Path(str(workspace_path)).resolve()
+        entry_path = (workspace_root / spec.workspace_entrypoint).resolve()
+        if not entry_path.exists() or not entry_path.is_relative_to(workspace_root):
+            continue
+        if spec.workspace_candidate_root is not None:
+            source_path = (workspace_root / spec.workspace_candidate_root).resolve()
+            candidate_root = spec.workspace_candidate_root.as_posix()
+            entry_relative_path = spec.entrypoint_name
+        else:
+            source_path = entry_path
+            candidate_root = None
+            entry_relative_path = entry_path.name
+        if not source_path.exists() or not source_path.is_relative_to(workspace_root):
+            continue
+        candidates.append(
+            {
+                "source_session_id": session.get("session_id"),
+                "source_workspace_path": str(workspace_root),
+                "source_path": str(source_path),
+                "entry_relative_path": entry_relative_path,
+                "candidate_root": candidate_root,
+                "candidate_mtime": _candidate_tree_mtime(source_path),
+            }
+        )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (float(item.get("candidate_mtime") or 0.0), str(item.get("source_session_id") or "")), reverse=True)
+    return candidates[0]
+
+
+def _candidate_tree_mtime(path: Path) -> float:
+    if path.is_file():
+        return path.stat().st_mtime
+    latest = path.stat().st_mtime
+    for item in path.rglob("*"):
+        if item.is_file():
+            latest = max(latest, item.stat().st_mtime)
+    return latest
 
 
 def _seed_from_incumbent(
@@ -1418,6 +1590,26 @@ def _materialize_candidate_artifact(*, artifact: dict[str, Any], workspace_root:
     _copy_directory_contents(source=source, destination=entry_path.parent)
 
 
+def _materialize_candidate_workspace_source(*, seed: dict[str, Any], workspace_root: Path, entry_path: Path) -> None:
+    source = Path(str(seed["source_path"])).resolve()
+    source_workspace = Path(str(seed["source_workspace_path"])).resolve()
+    if not source.exists():
+        raise FileNotFoundError(source)
+    if not source.is_relative_to(source_workspace):
+        raise PermissionError(f"workspace candidate seed escapes source workspace: {source}")
+    candidate_root = seed.get("candidate_root")
+    if candidate_root:
+        destination = (workspace_root / str(candidate_root)).resolve()
+        if not destination.is_relative_to(workspace_root):
+            raise PermissionError(f"candidate root must stay inside workspace: {candidate_root}")
+        _copy_materialized_path(source=source, destination=destination, force=True, read_only=False)
+        return
+    if source.is_dir():
+        _copy_directory_contents(source=source, destination=entry_path.parent)
+        return
+    _copy_materialized_path(source=source, destination=entry_path, force=True, read_only=False)
+
+
 def _copy_directory_contents(*, source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for item in sorted(source.rglob("*")):
@@ -1433,6 +1625,29 @@ def _copy_directory_contents(*, source: Path, destination: Path) -> None:
             else:
                 target.unlink()
         shutil.copy2(item, target)
+
+
+def _infer_artifact_entry_relative_path(content_path: Path, *, task_id: Any | None) -> str | None:
+    candidates: list[str] = []
+    if task_id:
+        try:
+            task = get_task(str(task_id))
+            spec = candidate_spec_for(task)
+        except Exception:
+            spec = None
+        if spec is not None:
+            candidates.append(spec.workspace_entrypoint.as_posix())
+            candidates.append(spec.entrypoint_name)
+
+    candidates.extend(("manifest.json", "entry.py", "candidate/manifest.json", "candidate/entry.py"))
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if (content_path / candidate).is_file():
+            return candidate
+    return None
 
 
 def _write_environment_bundle_staging(*, environment: dict[str, Any], staging_dir: Path) -> None:
@@ -1880,33 +2095,3 @@ def _environment_provider_config(payload: dict[str, Any], *, experiment: dict[st
 
 def _provider_enforces_external_network(provider: str) -> bool:
     return provider in {"docker_image", "docker", "local-docker", "local-docker-strict"}
-
-
-def _digest_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _digest_directory(path: Path) -> str:
-    digest = hashlib.sha256()
-    for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
-        digest.update(file_path.relative_to(path).as_posix().encode("utf-8"))
-        with file_path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _count_files(path: Path) -> int:
-    if path.is_file():
-        return 1
-    return sum(1 for item in path.rglob("*") if item.is_file())
-
-
-def _size_bytes(path: Path) -> int:
-    if path.is_file():
-        return path.stat().st_size
-    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())

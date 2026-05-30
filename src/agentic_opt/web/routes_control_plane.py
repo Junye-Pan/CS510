@@ -173,6 +173,7 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
                 api_url=api_url,
                 dry_run=bool(payload.get("dry_run")),
                 max_turn_wall_time_s=payload.get("max_turn_wall_time_s"),
+                codex_binary=payload.get("codex_binary") or payload.get("codexBinary"),
             )
             return jsonify(session), 202
         except Exception as exc:
@@ -431,6 +432,13 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
             return jsonify({"error": "artifact not found"}), 404
         return jsonify(artifact)
 
+    @app.post("/api/v1/artifacts/<artifact_id>/checkout")
+    def control_checkout_artifact(artifact_id: str):
+        try:
+            return jsonify(ctx.control_service.checkout_artifact(artifact_id, _payload()))
+        except Exception as exc:
+            return _error(exc, 404)
+
     @app.post("/api/v1/shared-tools")
     def control_publish_shared_tool():
         try:
@@ -665,9 +673,17 @@ def register_control_plane_routes(app: "Flask", ctx: "WebContext") -> None:
     @app.get("/api/v1/notebook-checkpoints")
     def control_list_notebook_checkpoints():
         assignment_id = request.args.get("assignment_id")
-        if not assignment_id:
-            return jsonify({"error": "assignment_id is required"}), 400
-        return jsonify({"notebook_checkpoints": ctx.control.list_notebook_checkpoints(assignment_id=assignment_id)})
+        experiment_id = request.args.get("experiment_id")
+        if not assignment_id and not experiment_id:
+            return jsonify({"error": "assignment_id or experiment_id is required"}), 400
+        return jsonify(
+            {
+                "notebook_checkpoints": ctx.control.list_notebook_checkpoints(
+                    assignment_id=assignment_id,
+                    experiment_id=experiment_id,
+                )
+            }
+        )
 
     @app.post("/api/v1/events")
     def control_record_event():

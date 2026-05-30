@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from agentic_opt.common.atomic import atomic_write_text
+from agentic_opt.common.files import digest_file as _digest_file
 
 from .repository import ControlPlaneRepository
 
@@ -1096,14 +1097,6 @@ def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
 
 def _digest_json(value: Any) -> str:
     return _digest_bytes(json.dumps(value, sort_keys=True).encode("utf-8", errors="replace"))
-
-
-def _digest_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
 
 
 def _digest_named_files(files: dict[str, Path]) -> str:

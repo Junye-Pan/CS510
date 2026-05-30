@@ -800,7 +800,11 @@ class ControlPlaneRepository:
         record = self.get_session(session_id)
         assert record is not None
         if status in TERMINAL_SESSION_STATUSES:
-            self.update_assignment_status(record["assignment_id"], status)
+            assignment = self.get_assignment(record["assignment_id"])
+            if assignment is not None and assignment.get("status") not in TERMINAL_ASSIGNMENT_STATUSES:
+                self.update_assignment_status(record["assignment_id"], status)
+            else:
+                self.refresh_experiment_status(record["experiment_id"])
         else:
             self.refresh_experiment_status(record["experiment_id"])
         return record
@@ -2166,16 +2170,26 @@ class ControlPlaneRepository:
             )
         return record
 
-    def list_notebook_checkpoints(self, *, assignment_id: str) -> list[dict[str, Any]]:
+    def list_notebook_checkpoints(
+        self,
+        *,
+        assignment_id: str | None = None,
+        experiment_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if assignment_id:
+            clauses.append("assignment_id = ?")
+            params.append(assignment_id)
+        if experiment_id:
+            clauses.append("experiment_id = ?")
+            params.append(experiment_id)
+        sql = "SELECT * FROM cp_notebook_checkpoints"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at DESC, checkpoint_id DESC"
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM cp_notebook_checkpoints
-                WHERE assignment_id = ?
-                ORDER BY created_at DESC, checkpoint_id DESC
-                """,
-                (assignment_id,),
-            ).fetchall()
+            rows = conn.execute(sql, tuple(params)).fetchall()
         return [self._row_notebook(row) for row in rows]
 
     def record_event(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2445,33 +2459,42 @@ class ControlPlaneRepository:
         if assignment is None:
             raise KeyError(assignment_id)
         experiment = self.get_experiment(assignment["experiment_id"])
+        experiment_id = assignment["experiment_id"]
         return {
             "assignment": assignment,
             "experiment": experiment,
-            "sessions": self.list_sessions(assignment_id=assignment_id),
-            "attempts": self.list_attempts(assignment_id=assignment_id),
-            "agent_traces": self.list_agent_traces(assignment_id=assignment_id),
-            "recent_findings": self.list_findings(task_id=assignment["task_id"])[:20],
-            "artifacts": self.list_artifacts(assignment_id=assignment_id),
-            "evaluations": self.list_evaluations(assignment_id=assignment_id),
-            "jobs": self.list_jobs(assignment_id=assignment_id),
+            "sessions": self.list_sessions(experiment_id=experiment_id),
+            "assignment_sessions": self.list_sessions(assignment_id=assignment_id),
+            "attempts": self.list_attempts(experiment_id=experiment_id),
+            "assignment_attempts": self.list_attempts(assignment_id=assignment_id),
+            "agent_traces": self.list_agent_traces(experiment_id=experiment_id),
+            "assignment_agent_traces": self.list_agent_traces(assignment_id=assignment_id),
+            "recent_findings": self.list_findings(experiment_id=experiment_id),
+            "artifacts": self.list_artifacts(experiment_id=experiment_id),
+            "assignment_artifacts": self.list_artifacts(assignment_id=assignment_id),
+            "evaluations": self.list_evaluations(experiment_id=experiment_id),
+            "assignment_evaluations": self.list_evaluations(assignment_id=assignment_id),
+            "jobs": self.list_jobs(experiment_id=experiment_id),
+            "assignment_jobs": self.list_jobs(assignment_id=assignment_id),
             "research_direction": (assignment.get("metadata") or {}).get("research_direction"),
-            "leaderboard": self.list_leaderboard_entries(experiment_id=assignment["experiment_id"], limit=10),
-            "incumbent": self.get_incumbent(experiment_id=assignment["experiment_id"]),
+            "leaderboard": self.list_leaderboard_entries(experiment_id=experiment_id, limit=1000),
+            "incumbent": self.get_incumbent(experiment_id=experiment_id),
             "direction_incumbent": (
-                self.get_incumbent(experiment_id=assignment["experiment_id"], direction_id=assignment["direction_id"])
+                self.get_incumbent(experiment_id=experiment_id, direction_id=assignment["direction_id"])
                 if assignment.get("direction_id")
                 else None
             ),
             "environments": self.list_environments(task_id=assignment["task_id"]),
             "environment_overlays": self.list_environment_overlays(assignment_id=assignment_id),
-            "telemetry_runs": self.list_telemetry_runs(assignment_id=assignment_id),
-            "notebook_checkpoints": self.list_notebook_checkpoints(assignment_id=assignment_id),
+            "telemetry_runs": self.list_telemetry_runs(experiment_id=experiment_id),
+            "assignment_telemetry_runs": self.list_telemetry_runs(assignment_id=assignment_id),
+            "notebook_checkpoints": self.list_notebook_checkpoints(experiment_id=experiment_id),
+            "assignment_notebook_checkpoints": self.list_notebook_checkpoints(assignment_id=assignment_id),
             "shared_tools": self.list_shared_tools(
                 task_id=assignment["task_id"],
-                experiment_id=assignment["experiment_id"],
+                experiment_id=experiment_id,
             ),
-            "network_access_events": self.list_network_access_events(assignment_id=assignment_id, limit=20),
+            "network_access_events": self.list_network_access_events(experiment_id=experiment_id, assignment_id=assignment_id, limit=200),
         }
 
     def _row_experiment(self, row: sqlite3.Row) -> dict[str, Any]:

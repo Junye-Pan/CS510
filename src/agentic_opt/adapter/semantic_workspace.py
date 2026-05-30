@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import hashlib
 import json
 import shlex
 import shutil
@@ -13,6 +12,7 @@ from typing import Any
 
 from agentic_opt.common.atomic import atomic_write_text
 from agentic_opt.common.config import get_repo_root
+from agentic_opt.common.files import digest_directory as _digest_directory, digest_file as _digest_file
 from agentic_opt.common.runtime_env import PreparedRuntimeEnv, prepare_task_runtime
 from agentic_opt.control_plane.task_context import (
     digest_directory,
@@ -139,6 +139,7 @@ def prepare_semantic_workspace(
         "AO_AGENT_ID": assignment["agent_id"],
         "AO_SESSION_ID": session_id,
         "AO_WORKSPACE_ROOT": str(workspace_root),
+        "AO_AGENT_JOBS_ENABLED": "0",
         **environment_exports,
         **network_exports,
         **runtime_env.exports(),
@@ -173,6 +174,7 @@ def build_semantic_startup_prompt(*, assignment: dict, workspace: SemanticWorksp
             f"Direction id: {direction.get('direction_id')}\n"
             f"Direction note: {direction.get('startup_note') or ''}\n"
         )
+    operator_note = _operator_note_text(assignment)
     bootstrap_text = _workspace_bootstrap_text(workspace)
     network_policy = workspace.network_policy.get("policy") if isinstance(workspace.network_policy, dict) else {}
     network_enforcement = workspace.network_policy.get("enforcement") if isinstance(workspace.network_policy, dict) else {}
@@ -183,9 +185,10 @@ Experiment: {assignment['experiment_id']}
 Assignment: {assignment['assignment_id']}
 Workspace: {workspace.root}
 {direction_text}
+{operator_note}
 {bootstrap_text}
 
-The server owns experiments, assignments, artifacts, jobs, evaluation, findings,
+The server owns experiments, assignments, artifacts, evaluation, findings,
 notebook checkpoints, registered traces, and policy. You own the autonomous
 research behavior inside this workspace.
 
@@ -198,7 +201,6 @@ Read server-provided context from the workspace files first:
 - history/findings/
 - history/notebooks/
 - history/evaluations/
-- history/jobs/
 - history/artifacts/
 - history/traces/
 - history/leaderboard.jsonl and history/incumbent.json
@@ -230,29 +232,59 @@ Use semantic server tools when you need server action or fresh status:
 - ./bin/artifact checkout-incumbent --destination <path>
 - ./bin/eval verify --entry <candidate-entrypoint>
 - ./bin/eval probe --entry <candidate-entrypoint>
-- ./bin/eval submit --entry <candidate-entrypoint>  # official evaluations are async by default
+- ./bin/eval submit --entry <candidate-entrypoint>  # official worker submissions run synchronously
 - ./bin/eval submit --artifact-id <artifact-id>
-- ./bin/eval status <evaluation-id> / ./bin/eval wait <evaluation-id>
 - ./bin/finding share --type <type> --title <title> --body <text>
 - ./bin/notebook checkpoint --file WORKLOG.md
-- ./bin/job create --provider local --command '<command>'
-- ./bin/job create --provider local-docker --image <image> --command '<command>' [--network-mode <mode>]
-- ./bin/job create --provider runpod --template-id <template> --command '<command>'
-- ./bin/job status <job-id> / ./bin/job logs <job-id> / ./bin/job attach <job-id> / ./bin/job wait <job-id>
 - ./bin/telemetry start --provider local --name <run-name>
 - ./bin/telemetry log-metrics <telemetry-id> --metric loss=0.1 --step 1
 - ./bin/telemetry finish <telemetry-id>
 - ./bin/ctx stop --reason <why>  # record why this session has no useful next action
+- ./bin/ctx global-stop --reason <why> --confirm-global-stop  # record assignment-level convergence or blocker
 
 These are capabilities, not a fixed workflow. Read context, implement, validate,
-evaluate, checkpoint, share findings, or launch jobs when evidence makes that
-action useful. Official scores must come from eval submit/server evaluation.
+evaluate, checkpoint, or share findings when evidence makes that action useful.
+Durable job launching is disabled for optimization workers; use direct local
+commands inside the current turn for scratch checks, and use eval for
+server-owned scoring. Official scores must come from eval submit/server
+evaluation.
+For kernel optimization tasks, keep candidate changes scoped to the candidate
+kernel implementation and manifest entries for those implementations. Do not
+remove required model components, rewrite model structure, or change evaluator
+inputs to improve score. Do not mine prior global run directories such as
+`/workspace/agentic-optimization/runs` or unrelated `/workspace/ao_state`
+workspaces/artifacts; use only this workspace and semantic server history made
+visible inside it. After a material candidate update, run
+`./bin/eval verify --entry candidate/manifest.json` promptly so the server
+verifier can provide durable feedback.
 If the current session has no useful next action, record useful state and run
-`./bin/ctx stop --reason <why>`.
+`./bin/ctx stop --reason <why>`. If the evidence shows the whole assignment is
+converged or blocked rather than just the current session, run
+`./bin/ctx global-stop --reason <why> --confirm-global-stop`.
 
 Network policy: {network_policy}
 Network enforcement: {network_enforcement}
 """
+
+
+def _operator_note_text(assignment: dict) -> str:
+    metadata = assignment.get("metadata") or {}
+    notes: list[str] = []
+    raw_budget_instruction = metadata.get("operator_budget_instruction")
+    if isinstance(raw_budget_instruction, dict):
+        message = raw_budget_instruction.get("message")
+        if message:
+            notes.append(str(message))
+    elif raw_budget_instruction:
+        notes.append(str(raw_budget_instruction))
+    for key in ("operator_instruction", "supervisor_instruction", "supervisor_note"):
+        value = metadata.get(key)
+        if value:
+            notes.append(str(value))
+    if not notes:
+        return ""
+    body = "\n".join(f"- {note}" for note in notes)
+    return f"Operator notes:\n{body}\n"
 
 
 def _agents_md_text() -> str:
@@ -261,15 +293,25 @@ def _agents_md_text() -> str:
 Use the workspace directory tree as your primary read interface.
 Do not assume a fixed numbered workflow.
 Use `task/TASK.md`, `task/public_contract.md`, `task/public_files/`, and `task/knowledge/` for task objective, public contract, and task-provided read-only context.
-Use `context/` and `history/` for assignment state, research direction, incumbent, leaderboard, prior findings, attempts, artifacts, jobs, evaluations, trace pointers, and notebook checkpoints.
+Use `context/` and `history/` for assignment state, research direction, incumbent, leaderboard, prior findings, attempts, artifacts, evaluations, trace pointers, and notebook checkpoints.
 Use local file tools such as `rg`, `jq`, `sed`, and `head` to inspect only the relevant slices of that state.
 Use `./bin/eval verify`, `./bin/eval probe`, and `./bin/eval submit` for server-owned feedback and official scoring.
-Use `env`, `attempt`, `artifact`, `finding`, `notebook`, `job`, `telemetry`, `tool`, `network`, and `trace` for durable server-visible mutations, permissioned actions, fresh status, or file locations.
+Use `env`, `attempt`, `artifact`, `finding`, `notebook`, `telemetry`, `tool`, `network`, and `trace` for durable server-visible mutations, permissioned actions, fresh status, or file locations.
 Use `trace` only to get registered coding-agent trace locations; inspect trace JSONL files yourself.
 Use `local_tools/` for draft helper tools and `tool publish` when a helper should become reusable by later workers.
 Check `network status` before any action that might need external internet. Control-plane access does not imply permission to search the public internet.
-Do not access hidden evaluator internals.
+Do not access hidden evaluator internals or mine prior global run directories.
+Only read this workspace, task/public files, task/knowledge, checked-out shared
+tools, and server-provided history exposed under this workspace. Do not inspect
+`/workspace/agentic-optimization/runs`, unrelated `/workspace/ao_state`
+workspaces/artifacts, or any other global experiment output unless it has been
+materialized into this workspace by a semantic server tool.
+For kernel tasks, keep candidate changes scoped to kernel implementation files
+and implementation manifest entries. After a material candidate edit, run
+`./bin/eval verify --entry candidate/manifest.json` promptly; do not spend the
+turn on extended local-only probing.
 If the current session has no useful next action, make useful state durable and run `./bin/ctx stop --reason <why>`.
+If the assignment itself is converged or blocked, run `./bin/ctx global-stop --reason <why> --confirm-global-stop` so the outer loop does not keep restarting equivalent sessions.
 """
 
 
@@ -524,24 +566,6 @@ def _make_tree_writable(root: Path) -> None:
     root.chmod(root.stat().st_mode | 0o700)
 
 
-def _digest_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _digest_directory(path: Path) -> str:
-    digest = hashlib.sha256()
-    for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
-        digest.update(file_path.relative_to(path).as_posix().encode("utf-8"))
-        with file_path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
 def _materialize_context_files(
     *,
     workspace_root: Path,
@@ -576,6 +600,14 @@ def _materialize_context_files(
             "notebook_checkpoints",
             "shared_tools",
             "network_access_events",
+            "assignment_sessions",
+            "assignment_attempts",
+            "assignment_agent_traces",
+            "assignment_artifacts",
+            "assignment_evaluations",
+            "assignment_jobs",
+            "assignment_telemetry_runs",
+            "assignment_notebook_checkpoints",
         )
     }
     current_state = {
@@ -623,15 +655,28 @@ def _materialize_history_files(*, workspace_root: Path, context: dict[str, Any])
     atomic_write_text(history_root / "environments.jsonl", _jsonl(context.get("environments") or []))
     atomic_write_text(history_root / "environment_overlays.jsonl", _jsonl(context.get("environment_overlays") or []))
 
+    assignment_root = history_root / "current_assignment"
+    _write_record_dir(assignment_root / "attempts", context.get("assignment_attempts") or [], "attempt_id", "attempt.json")
+    _write_record_dir(assignment_root / "artifacts", context.get("assignment_artifacts") or [], "artifact_id", "artifact.json")
+    _write_evaluations(assignment_root / "evaluations", context.get("assignment_evaluations") or [])
+    _write_record_dir(assignment_root / "jobs", context.get("assignment_jobs") or [], "job_id", "status.json")
+    _write_notebooks(assignment_root / "notebooks", context.get("assignment_notebook_checkpoints") or [])
+    _write_record_dir(assignment_root / "telemetry", context.get("assignment_telemetry_runs") or [], "telemetry_id", "telemetry.json")
+    _write_traces(assignment_root / "traces", context.get("assignment_agent_traces") or [])
+
 
 def _write_record_dir(root: Path, records: list[dict[str, Any]], id_key: str, filename: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    index_records: list[dict[str, Any]] = []
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             continue
+        index_records.append(record)
         record_id = _record_id(record, id_key, index)
         target = root / record_id
         target.mkdir(parents=True, exist_ok=True)
         atomic_write_text(target / filename, _json_pretty(record))
+    atomic_write_text(root / "index.jsonl", _jsonl(index_records))
 
 
 def _write_flat_records(root: Path, records: list[dict[str, Any]], id_key: str) -> None:
@@ -644,9 +689,12 @@ def _write_flat_records(root: Path, records: list[dict[str, Any]], id_key: str) 
 
 
 def _write_evaluations(root: Path, records: list[dict[str, Any]]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    index_records: list[dict[str, Any]] = []
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             continue
+        index_records.append(record)
         evaluation_id = _record_id(record, "evaluation_id", index)
         target = root / evaluation_id
         target.mkdir(parents=True, exist_ok=True)
@@ -654,6 +702,7 @@ def _write_evaluations(root: Path, records: list[dict[str, Any]]) -> None:
         for field, filename in (("request", "request.json"), ("result", "result.json"), ("public_feedback", "public_feedback.json")):
             if record.get(field) is not None:
                 atomic_write_text(target / filename, _json_pretty(record[field]))
+    atomic_write_text(root / "index.jsonl", _jsonl(index_records))
 
 
 def _write_network(root: Path, context: dict[str, Any]) -> None:
@@ -757,10 +806,10 @@ def _workspace_read_paths() -> dict[str, Any]:
         "context": ["context/current_state.json", "context/assignment.json", "context/network_policy.json"],
         "history": [
             "history/attempts/",
+            "history/current_assignment/attempts/",
             "history/findings/",
             "history/notebooks/",
             "history/evaluations/",
-            "history/jobs/",
             "history/artifacts/",
             "history/traces/",
             "history/leaderboard.jsonl",
@@ -779,8 +828,10 @@ This workspace is the default read interface for the worker.
 - `task/knowledge/` contains task-provided read-only context files when the
   task package provides them.
 - `context/` contains current assignment, experiment, and policy metadata.
-- `history/` contains prior attempts, findings, notebooks, evaluations, jobs,
-  artifacts, telemetry, shared-tool records, network events, and trace pointers.
+- `history/` contains experiment-wide attempts, findings, notebooks,
+  evaluations, artifacts, telemetry, shared-tool records, network events, and
+  trace pointers. Assignment-scoped shortcuts live under
+  `history/current_assignment/`.
 - `outbox/` is local scratch space for material you may later publish through
   `finding`, `artifact`, or `notebook` commands.
 
@@ -810,8 +861,10 @@ snapshot and local scratch files for the current session.
 
 Use `attempt create` to mark a candidate attempt as a first-class server record
 when you are starting a coherent candidate line. Link artifacts, evaluations,
-jobs, and telemetry with `--attempt-id` so later workers can reconstruct the
-attempt from structured resources.
+and telemetry with `--attempt-id` so later workers can reconstruct the attempt
+from structured resources. Read `history/attempts/index.jsonl` and the linked
+`history/evaluations/`, `history/artifacts/`, and `history/findings/` records
+before repeating a prior line of work.
 
 Attempts do not store summaries. Share reusable conclusions with `finding
 share`, and checkpoint longer local notes with `notebook checkpoint`.
@@ -824,9 +877,8 @@ Use `./bin/eval verify --entry <path>` for quick validity checks and
 `./bin/eval submit --entry <path>` or `./bin/eval submit --artifact-id
 <artifact-id>` for official scoring.
 
-Official submit evaluations are asynchronous by default. Read the returned
-`evaluation_id`, then use `eval status <evaluation-id>` or
-`eval wait <evaluation-id>` before relying on the result.
+Optimization-worker submit evaluations run synchronously. Treat the returned
+record as the server-owned scoring result for that submit.
 
 Do not inspect hidden evaluator data or task internals outside the public
 contract.
@@ -855,21 +907,6 @@ Use `WORKLOG.md` for local scratch planning and observations. Use
 `notebook checkpoint --file WORKLOG.md` when the current state should become
 server-visible memory for this assignment or future workers.
 """,
-    "job-use": """
-# Job Use
-
-Use `job create --provider local --command '<command>'` for host subprocess jobs,
-or `job create --provider local-docker --image <image> --command '<command>'`
-for Docker-backed local jobs. Use `job create --provider runpod` only when the
-assignment policy allows cloud execution. Use `job status`, `job logs`, and
-`job wait` to inspect durable compute that can outlive the current coding-agent
-turn. Use `job attach <job-id>` when a later session is explicitly continuing
-from or observing a job created by an earlier session; attach records the
-handoff without restarting the job or changing its original session/attempt.
-When external internet is denied, Docker-backed local jobs use Docker network
-isolation and cannot opt into broad networking. Future providers should use the
-same job resource contract.
-""",
     "environment-use": """
 # Environment Use
 
@@ -883,8 +920,8 @@ environment used for official scoring.
 # Telemetry Use
 
 Use `telemetry start`, `telemetry log-metrics`, and `telemetry finish` for
-non-official process or training metrics. Telemetry helps diagnose jobs and
-compare runs, but official scores must still come from `./bin/eval submit`.
+non-official process or training metrics. Telemetry helps compare local runs,
+but official scores must still come from `./bin/eval submit`.
 """,
     "tool-use": """
 # Shared Tool Use
@@ -967,13 +1004,14 @@ def _write_semantic_tool_wrappers(
         "AO_AGENT_ID": assignment["agent_id"],
         "AO_SESSION_ID": session_id,
         "AO_WORKSPACE_ROOT": str(workspace_root),
+        "AO_AGENT_JOBS_ENABLED": "0",
         **_environment_exports(runtime_env),
         **_network_exports(network_policy),
         **runtime_env.exports(),
         "PYTHONPATH": _prepend_path(str(get_repo_root() / "src"), os.environ.get("PYTHONPATH")),
         "VIRTUAL_ENV": str(runtime_env.venv_dir),
     }
-    for command_name in ("ctx", "attempt", "artifact", "eval", "finding", "notebook", "job", "env", "telemetry", "tool", "network", "trace"):
+    for command_name in ("ctx", "attempt", "artifact", "eval", "finding", "notebook", "env", "telemetry", "tool", "network", "trace"):
         lines = ["#!/bin/sh", "set -eu"]
         for key, value in exports.items():
             lines.append(f"export {key}={shlex.quote(str(value))}")

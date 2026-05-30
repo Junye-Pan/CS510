@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import socket
 from pathlib import Path
 from typing import Any
@@ -15,8 +16,11 @@ class ControlPlaneClientError(RuntimeError):
     pass
 
 
+DEFAULT_CONTROL_PLANE_CLIENT_TIMEOUT_S = 300.0
+
+
 class ControlPlaneClient:
-    def __init__(self, base_url: str, *, timeout_s: float = 120.0) -> None:
+    def __init__(self, base_url: str, *, timeout_s: float | None = None) -> None:
         parsed = urlparse(base_url)
         self.socket_path: Path | None = None
         if parsed.scheme == "unix":
@@ -26,7 +30,7 @@ class ControlPlaneClient:
             self.base_url = "http://agentic-opt-control-plane"
         else:
             self.base_url = base_url.rstrip("/")
-        self.timeout_s = timeout_s
+        self.timeout_s = _control_plane_client_timeout_s(timeout_s)
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         suffix = path if path.startswith("/") else f"/{path}"
@@ -109,3 +113,15 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         sock.settimeout(self.timeout)
         sock.connect(self.socket_path)
         self.sock = sock
+
+
+def _control_plane_client_timeout_s(explicit: float | None) -> float:
+    if explicit is not None:
+        return float(explicit)
+    raw = os.environ.get("AO_CONTROL_CLIENT_TIMEOUT_S")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return DEFAULT_CONTROL_PLANE_CLIENT_TIMEOUT_S

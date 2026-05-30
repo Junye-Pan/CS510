@@ -24,6 +24,7 @@ class RuntimeEnvironmentError(RuntimeError):
 class TaskRuntimeSpec:
     kind: str = "local_venv"
     python: str = ">=3.11"
+    python_candidates: tuple[str, ...] = ()
     requirements: tuple[str, ...] = ()
     required_imports: tuple[str, ...] = ()
     forbidden_shadow_modules: tuple[str, ...] = ()
@@ -34,6 +35,7 @@ class TaskRuntimeSpec:
         return {
             "kind": self.kind,
             "python": self.python,
+            "python_candidates": list(self.python_candidates),
             "requirements": list(self.requirements),
             "required_imports": list(self.required_imports),
             "forbidden_shadow_modules": list(self.forbidden_shadow_modules),
@@ -156,7 +158,7 @@ def _create_venv_with_fallback(*, venv_dir: Path, spec: TaskRuntimeSpec) -> None
         return
 
     errors: list[str] = []
-    for candidate in _iter_python_candidates():
+    for candidate in _iter_python_candidates(spec):
         if not _base_python_is_usable(candidate, spec):
             continue
         try:
@@ -289,7 +291,7 @@ def _select_base_python(spec: TaskRuntimeSpec) -> Path:
         candidate = Path(override).expanduser().resolve()
         _validate_base_python(candidate, spec, source="AO_TASK_RUNTIME_PYTHON")
         return candidate
-    for candidate in _iter_python_candidates():
+    for candidate in _iter_python_candidates(spec):
         if _base_python_is_usable(candidate, spec):
             return candidate
     raise RuntimeEnvironmentError(
@@ -332,7 +334,7 @@ def _base_python_is_usable(candidate: Path, spec: TaskRuntimeSpec) -> bool:
     return proc.returncode == 0
 
 
-def _iter_python_candidates() -> list[Path]:
+def _iter_python_candidates(spec: TaskRuntimeSpec | None = None) -> list[Path]:
     candidates: list[Path] = []
     seen: set[Path] = set()
 
@@ -346,6 +348,9 @@ def _iter_python_candidates() -> list[Path]:
         candidates.append(candidate)
 
     add(sys.executable)
+    if spec is not None:
+        for candidate in spec.python_candidates:
+            add(candidate)
     add(shutil.which("python3"))
     add(shutil.which("python"))
     add("/usr/bin/python3")

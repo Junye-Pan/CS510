@@ -80,25 +80,48 @@ class EnvironmentService:
                 )
             if provider_name != "local_venv":
                 raise RuntimeEnvironmentError(f"unsupported environment provider for {task_id}: {provider_name}")
+            provider_config = provider_config or {}
+            default_env = _provider_default_env(provider_config)
+            external_python = _provider_python_path(provider_config)
+            if external_python is not None:
+                return self._ensure_external_python_task_environment(
+                    task=task,
+                    task_id=task_id,
+                    experiment_id=experiment_id,
+                    python_path=external_python,
+                    root_path=_provider_root_path(provider_config, python_path=external_python),
+                    default_env=default_env,
+                )
             prepared = prepare_task_runtime(task, envs_root=self.environment_root / "tasks")
-            environment_id = _task_environment_id(task_id=task_id, fingerprint=prepared.fingerprint)
+            environment_fingerprint = prepared.fingerprint
+            if default_env:
+                environment_fingerprint = _fingerprint_json(
+                    {
+                        "runtime_fingerprint": prepared.fingerprint,
+                        "default_env": default_env,
+                    }
+                )
+            environment_id = _task_environment_id(task_id=task_id, fingerprint=environment_fingerprint)
             existing = self.repository.get_environment(environment_id)
+            metadata = {
+                "manifest_path": str(prepared.manifest_path),
+                "venv_dir": str(prepared.venv_dir),
+            }
+            if default_env:
+                metadata["default_env"] = default_env
             record = self.repository.upsert_environment(
                 {
                     "environment_id": environment_id,
                     "environment_type": "task",
                     "status": "ready",
-                    "fingerprint": prepared.fingerprint,
+                    "fingerprint": environment_fingerprint,
                     "python_path": str(prepared.python_path),
                     "root_path": str(prepared.root),
                     "task_id": task_id,
                     "experiment_id": experiment_id,
                     "spec": prepared.spec.to_jsonable(),
                     "lock": _pip_freeze(prepared.python_path),
-                    "metadata": {
-                        "manifest_path": str(prepared.manifest_path),
-                        "venv_dir": str(prepared.venv_dir),
-                    },
+                    "metadata": metadata,
                 }
             )
         if existing is None:
@@ -109,6 +132,107 @@ class EnvironmentService:
                     "event_type": "environment.ready",
                     "summary": f"task environment ready: {environment_id}",
                     "payload": {"environment_id": environment_id, "fingerprint": prepared.fingerprint},
+                }
+            )
+        return record
+
+    def _ensure_external_python_task_environment(
+        self,
+        *,
+        task: Any,
+        task_id: str,
+        experiment_id: str | None,
+        python_path: Path,
+        root_path: Path,
+        default_env: dict[str, str],
+    ) -> dict[str, Any]:
+        if not python_path.exists():
+            raise RuntimeEnvironmentError(f"configured task python does not exist: {python_path}")
+        spec = task.runtime_spec
+        fingerprint = _fingerprint_json(
+            {
+                "schema": 1,
+                "provider": "local_venv_external_python",
+                "task_id": task_id,
+                "spec": spec.to_jsonable(),
+                "python_path": str(python_path),
+                "default_env": default_env,
+            }
+        )
+        environment_id = _task_environment_id(task_id=task_id, fingerprint=fingerprint)
+        existing = self.repository.get_environment(environment_id)
+        if existing is not None and existing["status"] == "ready":
+            return existing
+
+        env_root = self.environment_root / "tasks" / task_id / fingerprint
+        env_root.mkdir(parents=True, exist_ok=True)
+        import_preflight = _run_external_import_preflight(
+            task_id=task_id,
+            python_path=python_path,
+            required_imports=tuple(spec.required_imports),
+            default_env=default_env,
+        )
+        atomic_write_text(env_root / "import_preflight.json", json.dumps(import_preflight, indent=2, sort_keys=True) + "\n")
+        public_seed_preflight = None
+        if spec.verify_public_seed:
+            public_seed_preflight = _run_external_public_seed_preflight(
+                task=task,
+                task_id=task_id,
+                python_path=python_path,
+                default_env=default_env,
+            )
+            atomic_write_text(
+                env_root / "public_seed_preflight.json",
+                json.dumps(public_seed_preflight, indent=2, sort_keys=True) + "\n",
+            )
+        manifest_path = env_root / "manifest.json"
+        metadata = {
+            "provider": "local_venv",
+            "external_python": True,
+            "manifest_path": str(manifest_path),
+            "default_env": default_env,
+            "import_preflight": import_preflight,
+        }
+        if public_seed_preflight is not None:
+            metadata["public_seed_preflight"] = public_seed_preflight
+        manifest = {
+            "task_id": task_id,
+            "fingerprint": fingerprint,
+            "provider": "local_venv",
+            "external_python": True,
+            "python_path": str(python_path),
+            "root_path": str(root_path),
+            "spec": spec.to_jsonable(),
+            "metadata": metadata,
+        }
+        atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        record = self.repository.upsert_environment(
+            {
+                "environment_id": environment_id,
+                "environment_type": "task",
+                "status": "ready",
+                "fingerprint": fingerprint,
+                "python_path": str(python_path),
+                "root_path": str(root_path),
+                "task_id": task_id,
+                "experiment_id": experiment_id,
+                "spec": {
+                    **spec.to_jsonable(),
+                    "provider": "local_venv",
+                    "external_python": True,
+                },
+                "lock": _pip_freeze(python_path),
+                "metadata": metadata,
+            }
+        )
+        if existing is None:
+            self.repository.record_event(
+                {
+                    "experiment_id": experiment_id,
+                    "task_id": task_id,
+                    "event_type": "environment.ready",
+                    "summary": f"task environment ready: {environment_id}",
+                    "payload": {"environment_id": environment_id, "fingerprint": fingerprint},
                 }
             )
         return record
@@ -728,6 +852,107 @@ def _environment_provider(environment: dict[str, Any] | None) -> str:
     return _normalize_environment_provider(metadata.get("provider") or spec.get("provider") or spec.get("kind") or "local_venv")
 
 
+def _provider_python_path(provider_config: dict[str, Any]) -> Path | None:
+    for key in ("python_path", "runtime_python", "existing_python"):
+        raw = provider_config.get(key)
+        if isinstance(raw, str) and raw:
+            # Preserve venv launcher paths. Resolving symlinks can collapse
+            # /path/to/venv/bin/python to the system interpreter and lose the
+            # venv's site-packages.
+            return Path(raw).expanduser().absolute()
+    return None
+
+
+def _provider_root_path(provider_config: dict[str, Any], *, python_path: Path) -> Path:
+    raw = provider_config.get("root_path") or provider_config.get("runtime_root")
+    if isinstance(raw, str) and raw:
+        return Path(raw).expanduser().resolve()
+    return python_path.parent.parent.resolve()
+
+
+def _external_task_env(default_env: dict[str, str]) -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
+    env.update(default_env)
+    repo_root = get_repo_root()
+    env["PYTHONPATH"] = str(repo_root / "src")
+    env.setdefault("AO_TASKS_ROOTS", str(repo_root / "tasks"))
+    return env
+
+
+def _run_external_import_preflight(
+    *,
+    task_id: str,
+    python_path: Path,
+    required_imports: tuple[str, ...],
+    default_env: dict[str, str],
+) -> dict[str, Any]:
+    code = (
+        "import importlib, json, sys\n"
+        "modules = {}\n"
+        f"for name in {list(required_imports)!r}:\n"
+        "    mod = importlib.import_module(name)\n"
+        "    modules[name] = {'version': getattr(mod, '__version__', None), 'file': getattr(mod, '__file__', None)}\n"
+        "print(json.dumps({'python': sys.executable, 'version_info': list(sys.version_info[:3]), 'modules': modules}, sort_keys=True))\n"
+    )
+    proc = subprocess.run(
+        [str(python_path), "-c", code],
+        cwd=str(get_repo_root()),
+        env=_external_task_env(default_env),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        raise RuntimeEnvironmentError(
+            f"external task runtime import preflight failed for {task_id}: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return json.loads(proc.stdout)
+
+
+def _run_external_public_seed_preflight(
+    *,
+    task: Any,
+    task_id: str,
+    python_path: Path,
+    default_env: dict[str, str],
+) -> dict[str, Any]:
+    candidate_spec = getattr(task.metadata, "candidate_spec", None)
+    if candidate_spec is not None:
+        entry_path = task.public_dir / candidate_spec.public_entrypoint
+    else:
+        entry_path = task.public_dir / task.metadata.entrypoint_name
+    code = (
+        "from __future__ import annotations\n"
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "from agentic_opt.task_registry import get_task\n"
+        "task = get_task(os.environ['AO_TASK_ID'])\n"
+        "result = task.verify_entry(Path(os.environ['AO_TASK_ENTRY']))\n"
+        "payload = {'valid': bool(result.get('valid')), 'status': result.get('status'), 'feedback': result.get('feedback')}\n"
+        "print(json.dumps(payload, sort_keys=True))\n"
+        "raise SystemExit(0 if payload['valid'] else 1)\n"
+    )
+    env = _external_task_env(default_env)
+    env["AO_TASK_ID"] = task_id
+    env["AO_TASK_ENTRY"] = str(entry_path)
+    proc = subprocess.run(
+        [str(python_path), "-c", code],
+        cwd=str(get_repo_root()),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        raise RuntimeEnvironmentError(
+            f"external task runtime public-seed preflight failed for {task_id}: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return json.loads(proc.stdout)
+
+
 def _docker_environment_spec(*, spec: Any, provider_config: dict[str, Any], base_image: str) -> dict[str, Any]:
     return {
         "kind": "docker_image",
@@ -743,7 +968,7 @@ def _docker_environment_spec(*, spec: Any, provider_config: dict[str, Any], base
     }
 
 
-def _docker_default_env(provider_config: dict[str, Any]) -> dict[str, str]:
+def _provider_default_env(provider_config: dict[str, Any]) -> dict[str, str]:
     raw = (
         provider_config.get("default_env")
         or provider_config.get("environment_variables")
@@ -751,6 +976,10 @@ def _docker_default_env(provider_config: dict[str, Any]) -> dict[str, str]:
         or {}
     )
     return _string_env(raw)
+
+
+def _docker_default_env(provider_config: dict[str, Any]) -> dict[str, str]:
+    return _provider_default_env(provider_config)
 
 
 def _string_env(raw: Any) -> dict[str, str]:

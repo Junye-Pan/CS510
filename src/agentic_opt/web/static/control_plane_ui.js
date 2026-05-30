@@ -571,7 +571,7 @@
               ["Cross-machine restore", "pending"],
               ["External artifact store restore", "pending"],
               ["Trace artifact packaging", "pending"],
-              ["Cloud provider task context immutability", "pending"],
+              ["Docker image task context immutability", "pending"],
             ]
           )}
         </div>
@@ -600,8 +600,9 @@
     const experiment = asObject(detail.experiment);
     const budget = asObject(experiment.budget);
     const total = positiveInt(budget.total_evaluator_runs || budget.evaluator_runs);
-    const used = getLeaderboardEntries().length;
-    const pending = asArray(detail.evaluations).filter(isPendingBudgetedEvaluation).length;
+    const budgeted = asArray(detail.evaluations).filter(isBudgetedSubmitEvaluation);
+    const pending = budgeted.filter((evaluation) => ["queued", "running"].includes(String(evaluation.status || ""))).length;
+    const used = budgeted.length - pending;
     const effectiveUsed = used + pending;
     const remaining = total == null ? null : Math.max(0, total - effectiveUsed);
     return {
@@ -609,17 +610,17 @@
       used,
       pending,
       remaining,
-      label: total == null ? `${used}` : `${used}/${total}`,
-      sub: pending ? `${pending} pending scoring run${pending === 1 ? "" : "s"}` : "leaderboard scores",
+      label: total == null ? `${effectiveUsed}` : `${effectiveUsed}/${total}`,
+      sub: pending ? `${pending} pending submit run${pending === 1 ? "" : "s"}` : "submit evaluator runs",
       detail:
         total == null
-          ? `${used} published leaderboard scores; no total_evaluator_runs limit configured`
-          : `${used} published leaderboard scores of ${total}; ${pending} queued/running scoring evaluations; ${remaining} remaining`,
+          ? `${effectiveUsed} submit evaluator runs; verifier and probe runs excluded; no total_evaluator_runs limit configured`
+          : `${used} finished submit evaluator runs of ${total}; ${pending} queued/running submit evaluations; verifier and probe runs excluded; ${remaining} remaining`,
     };
   }
 
-  function isPendingBudgetedEvaluation(evaluation) {
-    if (!["queued", "running"].includes(String(evaluation.status || ""))) {
+  function isBudgetedSubmitEvaluation(evaluation) {
+    if (["cancelled", "stopped"].includes(String(evaluation.status || ""))) {
       return false;
     }
     const request = asObject(evaluation.request);

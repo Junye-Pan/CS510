@@ -1,0 +1,19 @@
+{
+  "entries": [
+    {
+      "path": "baseline.md",
+      "title": "Baseline notes",
+      "description": "Explains the fallback-only public seed and the tensor-level task boundary."
+    },
+    {
+      "path": "near_parity_public_seed/manifest.json",
+      "title": "Public seed manifest",
+      "description": "Read-only manifest snapshot for the fallback-only public seed."
+    },
+    {
+      "path": "near_parity_public_seed/kernels/decode_attention.py",
+      "title": "Public seed decode attention kernel",
+      "description": "Read-only fallback-only seed implementation."
+    }
+  ]
+}
